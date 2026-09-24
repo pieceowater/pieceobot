@@ -41,6 +41,7 @@ type App struct {
 	bot      *tgbot.Bot
 	db       *repo.MessagesRepo
 	debounce *debouncesvc.Service
+	telegram *telegramsvc.Service
 	ctx      context.Context
 	cancel   context.CancelFunc
 }
@@ -93,7 +94,7 @@ func NewApp() *App {
 
 	return &App{
 		logger: logger, cfg: c, bot: b, db: messagesRepo, debounce: debounce,
-		ctx: ctx, cancel: cancel,
+		telegram: telegram, ctx: ctx, cancel: cancel,
 	}
 }
 
@@ -112,6 +113,9 @@ var ownerCommands = []models.BotCommand{
 func (a *App) Start() {
 	go a.cleanupLoop()
 	a.registerOwnerCommands()
+	// Backgrounded so a slow catch-up (several pending chats, each an LLM
+	// round trip) never delays bot.Start() picking up new updates.
+	go a.telegram.CatchUpPending(a.ctx, a.bot)
 	a.logger.Info("pieceobot started", slog.Int64("owner_user_id", a.cfg.OwnerUserID))
 	a.bot.Start(a.ctx)
 	a.logger.Info("pieceobot stopped")

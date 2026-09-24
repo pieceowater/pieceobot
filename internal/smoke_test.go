@@ -263,4 +263,31 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 		t.Fatalf("scenario E: expected owner to be notified about the pending decision")
 	}
 	t.Logf("scenario E: customer got %q, owner ping %q", actionNotice.Text, actionOwnerPing.Text)
+
+	// --- Scenario F: a message left unanswered across a "restart" gets caught up ---
+	const orphanChatID = int64(3005)
+	if err := messagesRepo.Add(ctx, orphanChatID, false, "привет, ты тут?"); err != nil {
+		t.Fatalf("scenario F: failed to seed orphan message: %v", err)
+	}
+	if err := chatStateRepo.TouchIncoming(ctx, orphanChatID); err != nil {
+		t.Fatalf("scenario F: failed to seed chat_state: %v", err)
+	}
+	// No debounce.Trigger call here -- this simulates the in-memory timer
+	// having died with the previous process, exactly as CatchUpPending exists for.
+	sentBefore = mock.count()
+	svc.CatchUpPending(ctx, b)
+	deadline = time.Now().Add(6 * time.Second)
+	for mock.count() < sentBefore+1 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	orphanAnswered := false
+	for _, m := range mock.snapshot() {
+		if int64(m.ChatID) == orphanChatID {
+			orphanAnswered = true
+			t.Logf("scenario F: caught-up reply: %q", m.Text)
+		}
+	}
+	if !orphanAnswered {
+		t.Fatalf("scenario F: expected CatchUpPending to answer the orphaned chat_id=%d", orphanChatID)
+	}
 }

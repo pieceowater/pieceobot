@@ -59,6 +59,33 @@ func New(
 	}
 }
 
+// CatchUpPending resumes chats left unanswered across a restart -- the
+// debounce timer that would have fired their reply lives only in the
+// previous process's memory and dies with it. Called once from app.go's
+// Start(), before/alongside polling. Each pending chat still goes through
+// the normal shouldConsider() guards (mute, owner-active, rate limits) via
+// processBatch, so this can't bypass any of them.
+func (s *Service) CatchUpPending(ctx context.Context, b *tgbot.Bot) {
+	connID, ok, err := s.businessConn.OwnerConnectionID(ctx)
+	if err != nil {
+		s.logger.Error("catch-up: failed to look up owner connection", slog.Any("error", err))
+		return
+	}
+	if !ok {
+		return // no active owner connection yet -- nothing to resume
+	}
+
+	chatIDs, err := s.chatState.PendingChatIDs(ctx)
+	if err != nil {
+		s.logger.Error("catch-up: failed to list pending chats", slog.Any("error", err))
+		return
+	}
+	for _, chatID := range chatIDs {
+		s.logger.Info("catching up on a chat left unanswered before restart", slog.Int64("chat_id", chatID))
+		s.processBatch(ctx, b, chatID, connID)
+	}
+}
+
 // HandleUpdate is registered via bot.WithDefaultHandler -- ТЗ 2's four
 // business update types plus plain messages (owner commands), explicitly
 // requested via bot.WithAllowedUpdates in app.go.
@@ -373,7 +400,11 @@ func (s *Service) notifyOwner(ctx context.Context, b *tgbot.Bot, text string) {
 }
 
 // notifyOwnerAboutChat is notifyOwner plus a tappable "open chat" button --
-// see telegramLink's comment for why it's a button and not text.
+// see telegramLink's comment for why it's a button and not text. Telegram
+// rejects the button outright for some customers (privacy settings that
+// block "add to chat"-style deep links -- observed: BUTTON_USER_PRIVACY_RESTRICTED),
+// which fails the *whole* send, not just the button -- so on any error here,
+// fall back to plain notifyOwner rather than losing the notification.
 func (s *Service) notifyOwnerAboutChat(ctx context.Context, b *tgbot.Bot, chatID int64, text string) {
 	_, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
 		ChatID: s.cfg.OwnerUserID,
@@ -385,7 +416,8 @@ func (s *Service) notifyOwnerAboutChat(ctx context.Context, b *tgbot.Bot, chatID
 		},
 	})
 	if err != nil {
-		s.logger.Error("failed to notify owner", slog.Any("error", err))
+		s.logger.Warn("failed to notify owner with button, retrying without it", slog.Any("error", err))
+		s.notifyOwner(ctx, b, text)
 	}
 }
 

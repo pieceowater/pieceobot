@@ -135,6 +135,27 @@ func (r *ChatStateRepo) TouchIncoming(ctx context.Context, chatID int64) error {
 	return r.upsert(ctx, chatID, func(s *ChatState) { s.LastMessageFromMe = false })
 }
 
+// PendingChatIDs returns chats whose last message is still from the
+// customer -- i.e. never answered. Used on startup to resume chats whose
+// in-memory debounce timer died with the previous process.
+func (r *ChatStateRepo) PendingChatIDs(ctx context.Context) ([]int64, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT chat_id FROM chat_state WHERE last_message_from_me = 0")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []int64
+	for rows.Next() {
+		var chatID int64
+		if err := rows.Scan(&chatID); err != nil {
+			return nil, err
+		}
+		out = append(out, chatID)
+	}
+	return out, rows.Err()
+}
+
 type SettingsRepo struct{ db *sql.DB }
 
 func NewSettingsRepo(db *sql.DB) *SettingsRepo { return &SettingsRepo{db: db} }
@@ -197,6 +218,24 @@ func (r *BusinessConnectionsRepo) Upsert(ctx context.Context, connID string, own
 		connID, ownerUserID, boolToInt(isOwner), boolToInt(isEnabled), boolToInt(canReply), time.Now().Unix(),
 	)
 	return err
+}
+
+// OwnerConnectionID returns the owner's active, reply-capable business
+// connection, if any -- used to resume processing chats left unanswered
+// across a restart (ТЗ follow-up: debounce timers are in-memory only and
+// die with the process).
+func (r *BusinessConnectionsRepo) OwnerConnectionID(ctx context.Context) (string, bool, error) {
+	var id string
+	err := r.db.QueryRowContext(ctx,
+		"SELECT id FROM business_connections WHERE is_owner = 1 AND is_enabled = 1 AND can_reply = 1 LIMIT 1",
+	).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return id, true, nil
 }
 
 func (r *BusinessConnectionsRepo) Get(ctx context.Context, connID string) (*BusinessConnRow, error) {
