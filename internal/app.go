@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tgbot "github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 
 	"pieceobot/internal/core/cfg"
 	debouncesvc "pieceobot/internal/pkg/debounce/svc"
@@ -96,12 +97,40 @@ func NewApp() *App {
 	}
 }
 
+// ownerCommands is the "/" menu Telegram shows when the owner opens their
+// direct chat with the bot -- see telegram/svc/commands.go for the handlers.
+var ownerCommands = []models.BotCommand{
+	{Command: "pause", Description: "Поставить бота на паузу (глобально)"},
+	{Command: "resume", Description: "Снять с паузы"},
+	{Command: "mute", Description: "Замьютить чат: /mute <user_id> или ответом на уведомление"},
+	{Command: "unmute", Description: "Размьютить чат"},
+	{Command: "budget", Description: "Посмотреть/поменять дневной бюджет: /budget <usd>"},
+	{Command: "stats", Description: "Статистика: ответы, токены, расход сегодня/за месяц"},
+}
+
 // Start blocks until Stop cancels it (graceful shutdown, ТЗ 6).
 func (a *App) Start() {
 	go a.cleanupLoop()
+	a.registerOwnerCommands()
 	a.logger.Info("pieceobot started", slog.Int64("owner_user_id", a.cfg.OwnerUserID))
 	a.bot.Start(a.ctx)
 	a.logger.Info("pieceobot stopped")
+}
+
+// registerOwnerCommands sets the "/" command menu, scoped to just the
+// owner's private chat with the bot -- nobody else who messages the bot
+// directly sees these, even though the handlers themselves also check
+// OwnerUserID (belt and suspenders, ТЗ 3.5).
+func (a *App) registerOwnerCommands() {
+	ctx, cancel := context.WithTimeout(a.ctx, 15*time.Second)
+	defer cancel()
+	_, err := a.bot.SetMyCommands(ctx, &tgbot.SetMyCommandsParams{
+		Commands: ownerCommands,
+		Scope:    &models.BotCommandScopeChat{ChatID: a.cfg.OwnerUserID},
+	})
+	if err != nil {
+		a.logger.Warn("failed to register owner command menu", slog.Any("error", err))
+	}
 }
 
 func (a *App) Stop() {
