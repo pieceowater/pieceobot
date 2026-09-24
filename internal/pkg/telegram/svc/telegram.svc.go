@@ -91,7 +91,15 @@ func (s *Service) CatchUpPending(ctx context.Context, b *tgbot.Bot) {
 	}
 	for _, chatID := range chatIDs {
 		s.logger.Info("catching up on a chat left unanswered before restart", slog.Int64("chat_id", chatID))
-		s.processBatch(ctx, b, chatID, connID)
+		// Bounded per-chat, like every other processBatch call site -- this
+		// loop is sequential, so without a timeout a single stuck LLM call
+		// (network stall, etc.) would hang forever and starve every other
+		// pending chat behind it in chatIDs, not just this one.
+		func() {
+			bg, cancel := context.WithTimeout(ctx, processTimeout)
+			defer cancel()
+			s.processBatch(bg, b, chatID, connID)
+		}()
 	}
 }
 
@@ -338,6 +346,12 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 			retryDelay = time.Duration(s.cfg.ChatWindowSec) * time.Second
 		case "owner_active":
 			retryDelay = time.Duration(s.cfg.OwnerActivePauseMin) * time.Minute
+		case "chat_daily":
+			if d, ok, err := s.limiter.RetryDelayForChatDaily(ctx, chatID); err != nil {
+				s.logger.Error("failed to compute chat_daily retry delay", slog.Any("error", err))
+			} else if ok {
+				retryDelay = d
+			}
 		}
 		if retryDelay > 0 {
 			s.debounce.TriggerAfter(chatID, retryDelay, func() {
@@ -432,7 +446,7 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 				s.logger.Error("touch_outgoing failed", slog.Any("error", err))
 			}
 			if s.cfg.NotifyOnSkip {
-				s.notifyOwner(ctx, b, fmt.Sprintf("Пропустил (%s):\n%s", contact, latestIncoming))
+				s.notifyOwnerAboutChat(ctx, b, chatID, fmt.Sprintf("Пропустил (%s):\n%s", contact, latestIncoming))
 			}
 		}
 		return
@@ -469,11 +483,11 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 	case result.IsRude:
 		// Always tell the owner about rude contacts, independent of
 		// NotifyOnSkip -- this isn't a skip, a reply was actually sent.
-		s.notifyOwner(ctx, b, fmt.Sprintf("Грубость (%s):\n%s", contact, latestIncoming))
+		s.notifyOwnerAboutChat(ctx, b, chatID, fmt.Sprintf("Грубость (%s):\n%s", contact, latestIncoming))
 	case result.IsAction:
 		// Same reasoning -- the customer was told "передал инфу", so the
 		// owner actually needs to see it now, not just on NotifyOnSkip.
-		s.notifyOwner(ctx, b, fmt.Sprintf("Нужно решение (%s):\n%s", contact, latestIncoming))
+		s.notifyOwnerAboutChat(ctx, b, chatID, fmt.Sprintf("Нужно решение (%s):\n%s", contact, latestIncoming))
 	}
 }
 
@@ -495,6 +509,30 @@ func (s *Service) notifyOwner(ctx context.Context, b *tgbot.Bot, text string) {
 	if _, err := b.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: s.cfg.OwnerUserID, Text: text}); err != nil {
 		s.logger.Error("failed to notify owner", slog.Any("error", err))
 	}
+}
+
+// notifyOwnerAboutChat is notifyOwner plus a "Посмотреть" button that opens
+// a tg://user?id=... deep link to the contact's chat. That link's button
+// form has previously failed a whole send outright on some contacts'
+// privacy settings (BUTTON_USER_PRIVACY_RESTRICTED) -- most don't hit this,
+// but since it's contact-dependent and unpredictable up front, a failed
+// attempt falls back to the same text with no button rather than losing the
+// notification entirely.
+func (s *Service) notifyOwnerAboutChat(ctx context.Context, b *tgbot.Bot, chatID int64, text string) {
+	_, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
+		ChatID: s.cfg.OwnerUserID,
+		Text:   text,
+		ReplyMarkup: &models.InlineKeyboardMarkup{
+			InlineKeyboard: [][]models.InlineKeyboardButton{
+				{{Text: "Посмотреть", URL: fmt.Sprintf("tg://user?id=%d", chatID)}},
+			},
+		},
+	})
+	if err == nil {
+		return
+	}
+	s.logger.Warn("owner notification with open-chat button failed, retrying without it", slog.Any("error", err))
+	s.notifyOwner(ctx, b, text)
 }
 
 // latestIncomingText returns the customer's trailing run of messages since
