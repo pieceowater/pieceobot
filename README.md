@@ -1,276 +1,334 @@
 # pieceobot
 
-Telegram Business-автоответчик на Claude Haiku 4.5. Подключается к твоему
-личному аккаунту через Telegram Business → Chatbots и отвечает собеседникам
-**от твоего имени** в личных чатах: только простой small talk. Всё сложное —
-молчит, лучше промолчать, чем ответить не в тему.
+A Telegram Business auto-responder on Claude. Connects to your personal
+account via Telegram Business → Chatbots and replies to people **as you**
+in private chats: simple small talk only. Anything more complicated stays
+silent — better to say nothing than to answer off-topic or out of place.
 
-Стек: Go 1.27 + [go-telegram/bot](https://github.com/go-telegram/bot) (long
-polling, без вебхука/домена), официальный Anthropic Go SDK
-(`claude-haiku-4-5`), SQLite (`modernc.org/sqlite`, чистый Go, без cgo),
-Docker Compose. Архитектура и подход — по мотивам `lotof.tg.capital.bot`:
-`cmd/server` → `internal/app.go` (wiring) → `internal/core/cfg` → `internal/pkg/<domain>/svc`.
+Stack: Go 1.27 + [go-telegram/bot](https://github.com/go-telegram/bot) (long
+polling, no webhook/domain needed), the official Anthropic Go SDK
+(`claude-sonnet-5` by default), SQLite (`modernc.org/sqlite`, pure Go, no
+cgo), Docker Compose. Architecture follows `lotof.tg.capital.bot`:
+`cmd/server` → `internal/app.go` (wiring) → `internal/core/cfg` →
+`internal/pkg/<domain>/svc`.
 
-Бот жёстко привязан к одному Telegram-аккаунту (`OWNER_USER_ID`) — если кто-то
-ещё подключит его к своему Business-аккаунту, бот это увидит и не будет там
-ничего делать (см. «Как это работает» ниже).
+The bot is hard-locked to a single Telegram account (`OWNER_USER_ID`) — if
+anyone else connects it to their own Business account, the bot notices and
+never does anything there (see "How it works" below).
 
 ---
 
-## Что нужно сделать руками
+## Manual setup steps
 
 ### 1. Telegram Premium
 
-Все функции Telegram Business (включая чат-ботов) доступны только с активной
-подпиской **Telegram Premium**. Без неё раздел Business в настройках вообще
-не появится.
+Every Telegram Business feature (including chatbots) requires an active
+**Telegram Premium** subscription. Without it, the Business section in
+Settings won't even appear.
 
-### 2. @BotFather — включить Business Mode
+### 2. @BotFather — enable Business Mode
 
-1. Открой [@BotFather](https://t.me/BotFather) → `/mybots` → выбери бота.
+1. Open [@BotFather](https://t.me/BotFather) → `/mybots` → pick your bot.
 2. **Bot Settings** → **Business Mode** → **Turn on**.
 
-Без этого шага Telegram при попытке добавить бота в автоответчики покажет
-`This bot doesn't support Telegram Business yet`.
+Skip this and Telegram shows `This bot doesn't support Telegram Business
+yet` when you try to add it as a chatbot.
 
 ### 3. Telegram → Settings → Telegram Business → Chatbots
 
-1. Укажи своего бота.
-2. На первое время выбери «только выбранные контакты», а не «все чаты» —
-   удобнее тестировать.
-3. Выдай боту право **отвечать на сообщения**.
+1. Point it at your bot.
+2. For the first test, pick "only selected contacts" rather than "all
+   chats" — much easier to verify.
+3. Grant the bot the **reply to messages** permission.
 
 ### 4. Anthropic API
 
-1. Ключ — [console.anthropic.com](https://console.anthropic.com) → API Keys.
-2. Там же поставь **лимит расхода** (Settings → Limits) — `.env`-бюджет
-   останавливает бота, но лимит в консоли Anthropic — это твой предохранитель
-   на случай, если сам бот где-то сломается.
+1. Get a key at [console.anthropic.com](https://console.anthropic.com) →
+   API Keys.
+2. While there, set a **spend limit** (Settings → Limits) — the `.env`
+   budget stops the bot itself, but the Anthropic console limit is your
+   backstop if the bot ever misbehaves.
 
-### 5. Свой numeric user id
+### 5. Your numeric user id
 
-`OWNER_USER_ID` в `.env` — это числовой id, не `@username`. Проще всего
-получить у [@userinfobot](https://t.me/userinfobot) (напиши ему `/start`).
-
----
-
-## Как это работает
-
-- Апдейты `business_connection`, `business_message`, `edited_business_message`,
-  `deleted_business_messages` включены явно в `allowed_updates`.
-- Бот не видит переписку до подключения — историю копит сам, из входящих
-  апдейтов, в SQLite. Это единственный источник контекста.
-- **Привязка к владельцу.** На каждый `business_connection`-апдейт бот
-  сверяет `business_connection.user.id` с `OWNER_USER_ID`. Если кто-то другой
-  подключит бота к своему Business-аккаунту, это подключение помечается
-  "не моё" и бот никогда не отвечает и не сохраняет историю по нему — сколько
-  бы сообщений туда ни пришло. Проверка на входе, не по paмени/username.
-- Один вызов LLM на пачку сообщений — модель сама решает: ответить текстом,
-  ответить стикером, выдать `SKIP` (полное молчание), `RUDE` (грубость/
-  агрессия) или `ACTION` (нужно решение/согласие владельца — деньги, встречи,
-  договорённости, приглашения и т.п.). Debounce ждёт 20 сек (макс. 60) после
-  последнего сообщения в пачке, прежде чем звать модель.
-- Решение оценивается только по последнему, ещё не отвеченному сообщению —
-  остальная история идёт моделью лишь как фон тона разговора, чтобы грубость
-  или тема одного сообщения не "протекала" на следующие, не связанные с ней.
-- Если сообщение от самого владельца (ты написал вручную с телефона) — бот
-  замолкает в этом чате на `OWNER_ACTIVE_PAUSE_MIN` минут. Если сообщение
-  отправил сам бот через Business API — это не считается «ты в диалоге» и
-  таймер не перезапускается (иначе бот молчал бы сам после себя).
-- **Грубость и запросы, требующие решения владельца, не просто пропускаются.**
-  На грубость модель отвечает «Ваше сообщение передано владельцу этого
-  автоответчика.», на запрос действия — «Я автоответчик — спрошу у владельца,
-  передал инфу.». В обоих случаях тебе всегда (вне зависимости от
-  `NOTIFY_ON_SKIP`) приходит уведомление с полным текстом и кнопкой «Открыть чат».
+`OWNER_USER_ID` in `.env` is a numeric id, not `@username`. The easiest way
+to get it is [@userinfobot](https://t.me/userinfobot) (message it `/start`).
 
 ---
 
-## Деплой
+## How it works
+
+- `business_connection`, `business_message`, `edited_business_message`, and
+  `deleted_business_messages` updates are explicitly listed in
+  `allowed_updates`.
+- The bot can't see any conversation history from before it was connected —
+  it builds its own from incoming updates, stored in SQLite. That's the
+  only source of context it has.
+- **Owner lock.** Every `business_connection` update is checked against
+  `business_connection.user.id == OWNER_USER_ID`. If someone else connects
+  the bot to their own Business account, that connection is marked "not
+  mine" and the bot never replies or stores history for it — no matter how
+  many messages arrive. The check happens on the numeric account id, not a
+  name or username.
+- One LLM call per message batch — the model itself decides: reply with
+  text, reply with a sticker, `SKIP` (stay completely silent), `RUDE`
+  (hostile/abusive message), or `ACTION` (needs the owner's own
+  decision/agreement — money, meetings, arrangements, invitations, etc.).
+  The call is **streamed** (lower time-to-first-byte than a blocking
+  request), though the reply is still fully assembled before it's sent —
+  Telegram needs the complete text, not a live-edited message. Debounce
+  waits 20s (max 60s) after the last message in a burst before calling the
+  model once for the whole batch.
+- The model judges tone/topic/rudeness only against the newest,
+  not-yet-answered message — the rest of the history is background tone
+  only, so one rude or heavy message doesn't "leak" onto unrelated ones
+  that follow it.
+- **Style personalization.** For a chat that already has a few of your own
+  messages, the model is told to match *that specific conversation's* tone
+  first, `persona.md` second. For a brand-new or barely-talked-to contact
+  (fewer than 3 of your own messages in that chat), the bot instead pulls
+  up to 10 of your genuinely hand-typed messages from *other* chats as
+  style examples — never its own past generated replies, which are tracked
+  separately precisely so they can't contaminate the sample.
+- If a message comes from you (typed by hand on your phone), the bot goes
+  quiet in that chat for `OWNER_ACTIVE_PAUSE_MIN` minutes. If the bot itself
+  sent a message via the Business API, that does *not* count as "you're in
+  the conversation" and doesn't restart the timer — otherwise the bot would
+  end up silencing itself after every reply.
+- **Rudeness and requests needing your decision aren't just dropped.** For
+  a rude message, the model replies "Ваше сообщение передано владельцу
+  этого автоответчика." ("Your message has been passed to the owner of
+  this auto-responder"); for something needing your call, "Я
+  автоответчик — спрошу у владельца, передал инфу." ("I'm a bot, I'll ask
+  the owner, passed it along"). Either way you always get notified (with
+  the full message text and the contact's name), regardless of
+  `NOTIFY_ON_SKIP`.
+- **Chat rate limit notice.** If a single chat hits its own reply limit
+  (`CHAT_LIMIT` per `CHAT_WINDOW_SEC`, default 3 per 5 minutes), the
+  customer gets one static, non-LLM-generated notice ("Я бот, устал
+  отвечать тебе — отвечу, когда лимит освободится.") instead of pure
+  silence on every message while limited — sent at most once per window, so
+  a chatty burst doesn't get spammed with the notice too.
+- **Restart resilience.** The debounce timer lives only in the process's
+  memory, so a restart landing inside a customer's open debounce window
+  would normally drop that reply silently. On startup, `CatchUpPending`
+  finds every chat whose last message is still unanswered
+  (`chat_state.last_message_from_me = 0`) and reprocesses it through the
+  normal pipeline — same rate limits, same mute/owner-active guards.
+
+---
+
+## Deploy
 
 ```bash
 git clone <repo> pieceobot && cd pieceobot
 cp .env.example .env
-# впиши BOT_TOKEN, ANTHROPIC_API_KEY, OWNER_USER_ID
-nano persona.md   # опиши свой стиль, 5-10 пунктов
+# fill in BOT_TOKEN, ANTHROPIC_API_KEY, OWNER_USER_ID
+nano persona.md   # describe your own texting style, 5-10 bullet points
 docker compose up -d --build
-docker compose logs -f bot   # проверить, что бот стартанул и получает апдейты
+docker compose logs -f bot   # confirm it started and is receiving updates
 ```
 
-Без Docker (локально): `go build ./cmd/server && ./server` (или `make run`).
+Without Docker (local run): `go build ./cmd/server && ./server` (or `make run`).
 
-### Обновление
+### Updating
 
 ```bash
 git pull
 docker compose up -d --build
 ```
 
-SQLite-файл лежит в `./data/bot.db` на хосте (volume) — переживает пересборку
-и рестарт контейнера.
+The SQLite file lives at `./data/bot.db` on the host (a volume) — it
+survives rebuilds and container restarts.
 
 ---
 
-## Конфигурация (`.env`)
+## Configuration (`.env`)
 
-Полный список — в `.env.example`, там же комментарии. Самое важное:
+Full list with comments in `.env.example`. The highlights:
 
-| Переменная | Что меняет |
+| Variable | What it controls |
 |---|---|
-| `DEBOUNCE_SEC` / `DEBOUNCE_MAX_SEC` | Сколько ждать паузу в сообщениях перед ответом |
-| `GLOBAL_LIMIT` / `CHAT_LIMIT` / `CHAT_DAILY_LIMIT` | Потолки LLM-вызовов (скользящее окно) |
-| `DAILY_BUDGET_USD` / `MONTHLY_BUDGET_USD` | Деньги в день/месяц — при достижении бот сам встаёт на паузу |
-| `OWNER_ACTIVE_PAUSE_MIN` | На сколько минут бот молчит после твоего ручного сообщения в чате |
-| `HISTORY_TTL_DAYS` | Через сколько дней чужая переписка удаляется из базы |
-| `BLACKLIST` / `WHITELIST` | user_id через запятую |
+| `DEBOUNCE_SEC` / `DEBOUNCE_MAX_SEC` | How long to wait for a message burst to settle before replying |
+| `GLOBAL_LIMIT` / `CHAT_LIMIT` / `CHAT_DAILY_LIMIT` | LLM-call ceilings (sliding windows) |
+| `DAILY_BUDGET_USD` / `MONTHLY_BUDGET_USD` | Daily/monthly spend cap — the bot auto-pauses once hit |
+| `OWNER_ACTIVE_PAUSE_MIN` | How many minutes the bot stays quiet after your own manual message in a chat |
+| `HISTORY_TTL_DAYS` | How many days other people's messages are kept before deletion |
+| `BLACKLIST` / `WHITELIST` | Comma-separated user ids |
 
-Поменять значение → отредактировать `.env` → `docker compose up -d` (пересоздаст
-контейнер с новыми переменными, без ребилда).
+To change a value: edit `.env` → `docker compose up -d` (recreates the
+container with the new environment, no rebuild needed).
 
-### Персона (`persona.md`)
+### Persona (`persona.md`)
 
-5-10 строк о том, как ты пишешь — подмешивается в системный промпт, и модели
-явно сказано жёстко держать именно этот стиль (длина фраз, знаки препинания,
-смайлы), а не скатываться в нейтральный ассистентский тон. Реальная история
-переписки в конкретном чате всё равно влияет сильнее — но персона задаёт
-базовый тон там, где истории ещё мало (новый контакт).
+5-10 lines describing how you actually text people — mixed into the system
+prompt, and the model is explicitly told to hold to that style strictly
+(sentence length, punctuation, forms of address, emoji) rather than
+drifting into a neutral, generic-assistant tone. Real conversation history
+in a given chat still wins when there's enough of it — persona.md is the
+baseline for chats that don't have much history yet (see "Style
+personalization" above).
 
-**Пока `persona.md` не заполнен** — используются только базовые правила без
-подстройки под тебя. Заполни его для более похожего на тебя стиля.
+**Until `persona.md` is filled in**, only the base rules apply, with no
+personal tuning. Fill it in for replies that actually sound like you.
 
-Изменения требуют рестарта: `docker compose restart bot`.
+Changes require a restart: `docker compose restart bot`.
 
-### Стикеры (`stickers.md`)
+### Stickers (`stickers.md`)
 
-Бот может ответить стикером вместо текста, если это уместно по смыслу.
-Список даёт `tag: file_id`, по одному на строку (`#` — комментарий):
+The bot can reply with a sticker instead of text when that fits the
+conversation. The list is `tag: file_id`, one per line (`#` starts a
+comment):
 
 ```
 laugh: CAACAgIAAxkBAAI...
 ok: CAACAgIAAxkBAAI...
 ```
 
-Чтобы узнать `file_id` — пришли нужный стикер **напрямую боту** (в тот же
-личный чат, что и команды) с аккаунта `OWNER_USER_ID`, бот пришлёт его
-`file_id` в ответ. Без `stickers.md` (или с пустым файлом) бот про стикеры
-даже не знает — в промпт это не попадает. Изменения требуют рестарта.
+To find a sticker's `file_id`, send it **directly to the bot** (the same
+private chat you use for commands) from the `OWNER_USER_ID` account — the
+bot replies with its `file_id`. Without `stickers.md` (or with an empty
+one), the bot doesn't even know stickers are an option — nothing about them
+is added to the prompt. Changes require a restart.
 
 ---
 
-## Управление (команды боту напрямую, не через Business)
+## Control (commands sent directly to the bot, not via Business)
 
-Пиши боту в обычный личный чат (не в Business-чат с клиентом), с аккаунта
-`OWNER_USER_ID`. От всех остальных пользователей команды молча игнорируются.
+Message the bot in a regular private chat (not the Business chat with a
+customer), from the `OWNER_USER_ID` account. Anyone else's commands are
+silently ignored.
 
-- `/pause`, `/resume` — глобально вкл/выкл.
-- `/mute <user_id>` (или ответом на уведомление вида `(id: 123)`),
-  `/unmute <user_id>` — для одного чата.
-- `/stats` — ответы сегодня / вызовы за 2 мин, токены in/out, расход $
-  сегодня и за месяц, остаток дневного бюджета.
-- `/budget <usd>` — поменять дневной лимит на лету (без правки `.env`).
+- `/pause`, `/resume` — global on/off.
+- `/mute <user_id>` (or by replying to a notification shaped like
+  `(id 123)`), `/unmute <user_id>` — per chat.
+- `/stats` — replies today / calls in the last 2 min, tokens in/out, spend
+  today and this month, remaining daily budget.
+- `/budget <usd>` — change the daily limit on the fly, no `.env` edit
+  needed.
 
-Уведомления о пропущенных/грубых сообщениях идут с кнопкой «Открыть чат»
-(inline-кнопка, а не голая `tg://` ссылка в тексте — такие ссылки не везде
-кликабельны в клиентах Telegram, кнопка кликабельна всегда) и полным текстом
-сообщения собеседника, без обрезки.
+Skip/rude/action-needed notifications show the customer's captured display
+name (falling back to `id N` if it hasn't been captured yet) instead of a
+bare id or a `tg://` link — neither a plain-text `tg://` link nor an inline
+"open chat" button render reliably across Telegram clients (the button
+could even fail the whole notification outright on some accounts' privacy
+settings). The numeric id stays in parentheses purely so `/mute`/`/unmute`
+can still parse a target out of a replied-to notification.
 
 ---
 
-## Логи
+## Logs
 
 ```bash
 docker compose logs -f bot
 ```
 
-Логируются только метаданные (chat_id, решение, токены) — **текст сообщений
-в логи не пишется**, только в SQLite.
+Only metadata is logged (chat_id, decision, token counts) — **message text
+is never written to logs**, only to SQLite.
 
 ---
 
-## Структура кода
+## Code layout
 
 ```
-cmd/server/main.go                       # entrypoint, graceful shutdown (SIGINT/SIGTERM)
-internal/app.go                          # wiring: все сервисы, единственный default handler
-internal/core/cfg/cfg.go                 # Config из .env, fail-fast на обязательных полях
-internal/pkg/storage/repo/               # sqlite схема + репозитории (messages, llm_calls, chat_state, ...)
-internal/pkg/limiter/svc/                # скользящие окна rate-limit + бюджет
-internal/pkg/debounce/svc/               # ожидание пачки сообщений (time.AfterFunc)
-internal/pkg/persona/svc/                # system prompt + persona.md
-internal/pkg/stickers/svc/               # stickers.md (tag -> file_id)
-internal/pkg/llm/svc/                    # один вызов Anthropic, парсинг SKIP/RUDE/ACTION/STICKER, расчёт стоимости
-internal/pkg/telegram/svc/telegram.svc.go # business_connection/business_message пайплайн (ТЗ 3.2)
+cmd/server/main.go                        # entrypoint, graceful shutdown (SIGINT/SIGTERM)
+internal/app.go                           # wiring: every service, the single default handler
+internal/core/cfg/cfg.go                  # Config from .env, fail-fast on required fields
+internal/pkg/storage/repo/                # sqlite schema + repositories (messages, llm_calls, chat_state, ...)
+internal/pkg/limiter/svc/                 # sliding-window rate limits + budget
+internal/pkg/debounce/svc/                # message-burst debounce (time.AfterFunc)
+internal/pkg/persona/svc/                 # system prompt + persona.md
+internal/pkg/stickers/svc/                # stickers.md (tag -> file_id)
+internal/pkg/llm/svc/                     # the one streamed Anthropic call, SKIP/RUDE/ACTION/STICKER parsing, cost calc, style examples
+internal/pkg/telegram/svc/telegram.svc.go # business_connection/business_message pipeline
 internal/pkg/telegram/svc/commands.go     # /pause /resume /mute /unmute /stats /budget
 ```
 
-Ровно тот же `cmd/server` + `internal/core` + `internal/pkg/<domain>/svc`
-слой, что и в `lotof.tg.capital.bot`: `cfg.Inst()` — синглтон конфига,
-`app.go` — единственное место, которое связывает все сервисы, каждый домен —
-свой пакет `svc`. В отличие от референса (который дёргает Telegram голым
-HTTP-клиентом — ему хватает одного `sendMessage`), этому боту нужен
-полноценный long polling с обработкой `business_connection`/`business_message`,
-поэтому вместо самодельного клиента используется `go-telegram/bot` — но
-Update-диспетчер (`Service.HandleUpdate` в telegram.svc.go) остаётся одной
-точкой входа, как и `Job`/`Scheduler` в референсе.
+The same `cmd/server` + `internal/core` + `internal/pkg/<domain>/svc`
+layering as `lotof.tg.capital.bot`: `cfg.Inst()` is the config singleton,
+`app.go` is the one place that wires every service together, each domain
+gets its own `svc` package. Unlike the reference bot (which talks to
+Telegram with a bare HTTP client — all it ever needs is one `sendMessage`
+call), this bot needs full long polling with
+`business_connection`/`business_message` handling, so it uses
+`go-telegram/bot` instead of a hand-rolled client — but the update
+dispatcher (`Service.HandleUpdate` in telegram.svc.go) stays the single
+entry point, playing the same role the reference bot's `Job`/`Scheduler`
+does.
 
-`internal/smoke_test.go` — сквозной тест пайплайна (owner-привязка, debounce,
-грубость → canned-ответ + пинг владельцу, отправка) против реального
-Anthropic API и поднятого в тесте mock-сервера Telegram; тихо пропускается
-(`t.Skip`), если `ANTHROPIC_API_KEY` не задан в окружении.
-`internal/pkg/llm/svc/llm_test.go` — чистый юнит-тест разбора SKIP/RUDE/ACTION/
-STICKER:<тег> без сети. `go test ./...` — без ключа smoke-тест скипается,
-остальное гоняется как обычно.
+`internal/smoke_test.go` is an end-to-end pipeline test (owner lock,
+debounce, rude/action canned replies + owner pings, sticker replies,
+rate-limit notice, restart catch-up, manual-vs-bot-generated message
+isolation) against the real Anthropic API with a mock Telegram server;
+it's silently skipped (`t.Skip`) if `ANTHROPIC_API_KEY` isn't set.
+`internal/pkg/llm/svc/llm_test.go` is a pure, no-network unit test of the
+SKIP/RUDE/ACTION/`STICKER:<tag>` parsing and the style-examples prompt
+assembly. `go test ./...` — without a key the smoke test skips, everything
+else runs as usual.
 
 ---
 
-## Приёмка
+## Acceptance testing
 
-Автоматически проверено (реальные вызовы Claude Haiku 4.5 через полный
-пайплайн — `internal/smoke_test.go` — и вручную в ходе разработки):
+Verified automatically (real Claude calls through the full pipeline via
+`internal/smoke_test.go`, plus manual testing during development):
 
-1. ✅ «Привет, как дела?» → короткий ответ в тему. Подтверждено и вживую на
-   реальном Business-подключении.
-2. ✅ «Скинь 5000 тенге до завтра» → `ACTION`, customer получает «Я
-   автоответчик — спрошу у владельца, передал инфу.», ничего не решается
-   за владельца.
-3. ✅ «Ты бот?» → `SKIP`, полное молчание.
-4. ✅ Пачка из нескольких сообщений подряд → ровно один вызов модели (debounce),
-   в проде отработал за ~20 сек как в конфиге.
-5. ✅ Привязка к владельцу: business_connection от чужого аккаунта → ноль
-   отправленных сообщений, сколько бы сообщений туда ни пришло.
-6. ✅ Грубость/агрессия → customer получает «Ваше сообщение передано
-   владельцу этого автоответчика.», владелец получает пинг с полным текстом
-   и кнопкой «Открыть чат» — подтверждено и вживую, и в smoke-тесте.
-7. ✅ Грубость в истории не "протекает" на следующее нейтральное сообщение
-   того же собеседника (найдено и исправлено вживую: "го курить" после
-   "пошёл нахуй" ошибочно ловило RUDE, пока решение не стало оцениваться
-   только по последнему сообщению).
-8. ✅ Rate-limit/бюджет: sliding-window счётчики и авто-пауза по бюджету — код-ревью + ручная проверка.
-9. ✅ Рестарт: SQLite в volume, `PRAGMA journal_mode=WAL`, лимиты/история
-   переживают рестарт контейнера. Нюанс: если рестарт (например, передеплой)
-   попадает ровно в 20-60-секундное окно дебаунса уже пришедшего сообщения,
-   этот конкретный ответ теряется (дебаунс живёт только в памяти процесса) —
-   собеседник просто не получит ответ на то самое сообщение, а сообщение
-   останется в истории и попадёт в контекст следующего ответа.
+1. ✅ "Привет, как дела?" ("Hi, how's it going?") → a short, on-topic
+   reply. Confirmed live on a real Business connection too.
+2. ✅ "Скинь 5000 тенге до завтра" ("Send me 5000 tenge by tomorrow") →
+   `ACTION`, the customer gets the "I'll ask the owner" notice, nothing is
+   decided on the owner's behalf.
+3. ✅ "Ты бот?" ("Are you a bot?") → `SKIP`, full silence.
+4. ✅ A burst of several messages in a row → exactly one model call
+   (debounce); in production it settled in ~20s as configured.
+5. ✅ Owner lock: a `business_connection` from someone else's account →
+   zero replies sent, however many messages arrive there.
+6. ✅ Rude/hostile message → the customer gets the canned notice, the owner
+   gets a ping with the full text and the contact's name — confirmed live
+   and in the smoke test.
+7. ✅ Rudeness in history doesn't "leak" onto the next, unrelated message
+   from the same contact (found and fixed live: "го курить" right after
+   "пошел нахуй" was incorrectly flagged RUDE by association, until the
+   decision was scoped to only the newest message).
+8. ✅ Rate limit/budget: sliding-window counters and budget auto-pause —
+   code review + manual verification, plus a dedicated smoke-test scenario
+   for the per-chat notice and its once-per-window dedup.
+9. ✅ Restart: SQLite on a volume, `PRAGMA journal_mode=WAL`, limits and
+   history survive a container restart. A restart landing inside an open
+   debounce window (e.g. a redeploy mid-conversation) used to drop that
+   reply silently — `CatchUpPending` now finds and reprocesses any such
+   chat on startup, confirmed live after two real redeploy collisions
+   during testing.
+10. ✅ A bare incoming sticker never gets silently dropped — it gets either
+    a matching sticker from `stickers.md` or, failing that, a fallback
+    emoji drawn from persona.md's own whitelist (never a generic smiley) —
+    confirmed live in production.
 
-Требует реального Business-подключения (проверь руками после деплоя):
+Requires a real Business connection (verify by hand after deploying):
 
-10. Ты пишешь в чат сам → бот молчит 30 мин.
-11. Входящий стикер/голосовое от собеседника → сохраняется как
-    `[стикер]`/`[голосовое]` в историю; голый стикер гарантированно получает
-    ответ (стикером из `stickers.md`, иначе запасным эмодзи из твоего
-    whitelist'а в `persona.md`) — не молчит никогда.
-12. Спам из разных чатов → не больше `GLOBAL_LIMIT` вызовов в `GLOBAL_WINDOW_SEC`.
-13. `DAILY_BUDGET_USD=0.001` → бот встаёт на паузу и присылает уведомление.
-14. `/stats` — сверить цифры с тем, что видно в Anthropic-консоли.
+11. You message the chat yourself → the bot stays quiet for 30 minutes.
+12. Incoming voice message → stored as `[голосовое]` in history, no reply
+    attempted on its own (only stickers get the guaranteed-reply treatment).
+13. A burst of spam across different chats → no more than `GLOBAL_LIMIT`
+    calls within `GLOBAL_WINDOW_SEC`.
+14. `DAILY_BUDGET_USD=0.001` → the bot pauses itself and sends a
+    notification.
+15. `/stats` — cross-check the numbers against the Anthropic console.
 
 ---
 
 ## Troubleshooting
 
-**"This bot doesn't support Telegram Business yet"** при добавлении в
-автоответчики → не включён Business Mode в BotFather (см. шаг 2 выше).
+**"This bot doesn't support Telegram Business yet"** when adding it as a
+chatbot → Business Mode isn't enabled in BotFather (see step 2 above).
 
-**Бот не отвечает вообще ни на что** → проверь: подписка Premium активна,
-право «отвечать на сообщения» выдано в настройках Business, `OWNER_USER_ID`
-в `.env` совпадает с твоим настоящим numeric id (не username), контейнер не
-на паузе (`/stats` покажет).
+**The bot doesn't respond to anything at all** → check: Premium
+subscription is active, the "reply to messages" permission is granted in
+Business settings, `OWNER_USER_ID` in `.env` matches your real numeric id
+(not a username), the container isn't paused (`/stats` will show it).
+
+**`` `temperature` is deprecated for this model ``** → current-generation
+models (Sonnet 5, Opus 5+) reject the `temperature` parameter outright;
+older ones like Haiku 4.5 merely accept it. The code no longer sends it at
+all, which works on every model — if you see this error, you're running an
+older build.
