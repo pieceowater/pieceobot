@@ -253,9 +253,12 @@ func (r *LlmCallsRepo) TokensSince(ctx context.Context, cutoffTS int64) (inTok, 
 	return inTok, outTok, err
 }
 
+// SentCountSince counts calls that actually produced an outbound message --
+// a real reply, a rude-notice reply, or a sticker, but not a silent skip/error.
 func (r *LlmCallsRepo) SentCountSince(ctx context.Context, cutoffTS int64) (int, error) {
 	var n int
-	err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM llm_calls WHERE ts >= ? AND result = 'sent'", cutoffTS).Scan(&n)
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM llm_calls WHERE ts >= ? AND result IN ('sent', 'rude', 'sticker')", cutoffTS).Scan(&n)
 	return n, err
 }
 

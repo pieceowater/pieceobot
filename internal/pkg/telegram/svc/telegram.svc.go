@@ -275,6 +275,10 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 	switch {
 	case result.Error:
 		resultLabel = "error"
+	case result.StickerFileID != nil:
+		resultLabel = "sticker"
+	case result.IsRude:
+		resultLabel = "rude"
 	case result.ReplyText != nil:
 		resultLabel = "sent"
 	}
@@ -288,25 +292,50 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 		s.notifyOwner(ctx, b, "Бюджет исчерпан — бот встал на паузу.")
 	}
 
-	if result.Error || result.ReplyText == nil {
+	if result.Error || (result.ReplyText == nil && result.StickerFileID == nil) {
 		if result.IsSkip() && s.cfg.NotifyOnSkip {
-			s.notifyOwner(ctx, b, fmt.Sprintf("Пропустил (%d): %s", chatID, lastLinePreview(historyText, 80)))
+			s.notifyOwner(ctx, b, fmt.Sprintf("Пропустил (%s): %s", telegramLink(chatID), lastLinePreview(historyText, 80)))
 		}
 		return
 	}
 
-	if _, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
-		ChatID:               chatID,
-		Text:                 *result.ReplyText,
-		BusinessConnectionID: connID,
-	}); err != nil {
-		s.logger.Error("failed to send message", slog.Any("error", err))
-		return
+	if result.StickerFileID != nil {
+		if _, err := b.SendSticker(ctx, &tgbot.SendStickerParams{
+			ChatID:               chatID,
+			Sticker:              &models.InputFileString{Data: *result.StickerFileID},
+			BusinessConnectionID: connID,
+		}); err != nil {
+			s.logger.Error("failed to send sticker", slog.Any("error", err))
+			return
+		}
+		_ = s.messages.Add(ctx, chatID, true, "[стикер]")
+	} else {
+		if _, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
+			ChatID:               chatID,
+			Text:                 *result.ReplyText,
+			BusinessConnectionID: connID,
+		}); err != nil {
+			s.logger.Error("failed to send message", slog.Any("error", err))
+			return
+		}
+		_ = s.messages.Add(ctx, chatID, true, *result.ReplyText)
 	}
-	_ = s.messages.Add(ctx, chatID, true, *result.ReplyText)
+
 	if err := s.chatState.TouchOutgoing(ctx, chatID); err != nil {
 		s.logger.Error("touch_outgoing failed", slog.Any("error", err))
 	}
+
+	if result.IsRude {
+		// Always tell the owner about rude contacts, independent of
+		// NotifyOnSkip -- this isn't a skip, a reply was actually sent.
+		s.notifyOwner(ctx, b, fmt.Sprintf("Грубость (%s): %s", telegramLink(chatID), lastLinePreview(historyText, 80)))
+	}
+}
+
+// telegramLink opens the customer's chat directly from a notification --
+// chatID is their user id (private chats: chat.id == user.id).
+func telegramLink(chatID int64) string {
+	return fmt.Sprintf("tg://user?id=%d", chatID)
 }
 
 func (s *Service) notifyOwner(ctx context.Context, b *tgbot.Bot, text string) {

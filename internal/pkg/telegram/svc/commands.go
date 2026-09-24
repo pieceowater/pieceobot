@@ -16,12 +16,23 @@ import (
 // Everything here is gated on OwnerUserID -- anyone else's commands are
 // silently ignored (ТЗ 3.5).
 
-var chatIDInText = regexp.MustCompile(`\((-?\d+)\)`)
+var chatIDInText = regexp.MustCompile(`tg://user\?id=(-?\d+)`)
 
 func (s *Service) handleCommand(ctx context.Context, b *tgbot.Bot, msg *models.Message) {
 	if msg.Chat.Type != models.ChatTypePrivate || msg.From == nil || msg.From.ID != s.cfg.OwnerUserID {
 		return
 	}
+
+	if msg.Sticker != nil {
+		// Owner sent a sticker directly to the bot -- surface its file_id so
+		// they can add it to STICKERS_PATH (ТЗ follow-up: sticker replies).
+		s.reply(ctx, b, msg.Chat.ID, fmt.Sprintf(
+			"file_id: %s\n\nДобавь строку в %s: <тег>: %s",
+			msg.Sticker.FileID, s.cfg.StickersPath, msg.Sticker.FileID,
+		))
+		return
+	}
+
 	if !strings.HasPrefix(msg.Text, "/") {
 		return
 	}

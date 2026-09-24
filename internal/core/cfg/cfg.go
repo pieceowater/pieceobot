@@ -47,8 +47,9 @@ type Config struct {
 	Blacklist map[int64]struct{}
 	Whitelist map[int64]struct{}
 
-	DBPath      string
-	PersonaPath string
+	DBPath       string
+	PersonaPath  string
+	StickersPath string
 }
 
 var (
@@ -95,8 +96,9 @@ func Inst() *Config {
 			Blacklist: getIDSet("BLACKLIST"),
 			Whitelist: getIDSet("WHITELIST"),
 
-			DBPath:      getEnv("DB_PATH", "data/bot.db"),
-			PersonaPath: getEnv("PERSONA_PATH", "persona.md"),
+			DBPath:       getEnv("DB_PATH", "data/bot.db"),
+			PersonaPath:  getEnv("PERSONA_PATH", "persona.md"),
+			StickersPath: getEnv("STICKERS_PATH", "stickers.md"),
 		}
 	})
 	return instance

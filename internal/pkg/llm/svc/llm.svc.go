@@ -12,24 +12,35 @@ package svc
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"pieceobot/internal/core/cfg"
-	"pieceobot/internal/pkg/persona/svc"
+	personasvc "pieceobot/internal/pkg/persona/svc"
+	stickerssvc "pieceobot/internal/pkg/stickers/svc"
 	"pieceobot/internal/pkg/storage/repo"
 )
 
 const (
 	skipMarker      = "SKIP"
+	rudeMarker      = "RUDE"
+	stickerPrefix   = "STICKER:"
 	charsPerToken   = 3 // conservative estimate for mixed Cyrillic/Latin text
 	maxMessageChars = 500
 )
 
+// RudeNoticeText is sent to the customer (not the model's own words) when
+// the model classifies their message as rude/aggressive -- ТЗ follow-up:
+// don't just go silent, let them know a human will see it.
+const RudeNoticeText = "Ваше сообщение передано владельцу этого автоответчика."
+
 type Result struct {
 	ReplyText           *string
+	StickerFileID       *string
+	IsRude              bool
 	InputTokens         int64
 	OutputTokens        int64
 	CacheCreationTokens int64
@@ -38,7 +49,11 @@ type Result struct {
 	Error               bool
 }
 
-func (r Result) IsSkip() bool { return !r.Error && r.ReplyText == nil }
+// IsSkip is true only for a silent, no-reply-sent decision -- a rude-notice
+// reply or a sticker reply has ReplyText/StickerFileID set and is not a skip.
+func (r Result) IsSkip() bool {
+	return !r.Error && r.ReplyText == nil && r.StickerFileID == nil
+}
 
 func ComputeCost(u anthropic.Usage, c *cfg.Config) float64 {
 	priceIn := c.PriceInputPerMTok / 1_000_000
@@ -87,11 +102,16 @@ type Service struct {
 	cfg          *cfg.Config
 	client       anthropic.Client
 	systemPrompt string
+	stickers     map[string]string
 	logger       *slog.Logger
 }
 
 func New(c *cfg.Config, logger *slog.Logger) (*Service, error) {
-	personaText, err := svc.LoadPersona(c.PersonaPath)
+	personaText, err := personasvc.LoadPersona(c.PersonaPath)
+	if err != nil {
+		return nil, err
+	}
+	stickers, err := stickerssvc.Load(c.StickersPath)
 	if err != nil {
 		return nil, err
 	}
@@ -99,12 +119,56 @@ func New(c *cfg.Config, logger *slog.Logger) (*Service, error) {
 		option.WithAPIKey(c.AnthropicAPIKey),
 		option.WithMaxRetries(1), // one retry with backoff, then give up -- ТЗ 6
 	)
+	systemPrompt := personasvc.BuildSystemPrompt(personaText) + stickerInstructions(stickers)
 	return &Service{
 		cfg:          c,
 		client:       client,
-		systemPrompt: svc.BuildSystemPrompt(personaText),
+		systemPrompt: systemPrompt,
+		stickers:     stickers,
 		logger:       logger,
 	}, nil
+}
+
+// stickerInstructions documents the available sticker tags in the prompt --
+// omitted entirely when there are none, so an unconfigured bot never sees
+// STICKER: mentioned at all.
+func stickerInstructions(stickers map[string]string) string {
+	if len(stickers) == 0 {
+		return ""
+	}
+	tags := make([]string, 0, len(stickers))
+	for tag := range stickers {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags) // deterministic prompt text
+	return "\n\nЕсли уместнее ответить стикером, а не текстом, и он точно подходит по смыслу/настроению " +
+		"(не используй просто так) — вместо текста выведи ровно STICKER:<тег> и больше ничего. " +
+		"Доступные теги: " + strings.Join(tags, ", ") + "."
+}
+
+// parseModelOutput interprets the model's raw text: SKIP -> silent (all nil),
+// RUDE -> the canned customer-facing notice, STICKER:<tag> -> a resolved
+// file_id (or a silent skip if the tag is unknown/hallucinated), anything
+// else -> a normal reply. Pure function, no I/O -- see llm_test.go.
+func parseModelOutput(rawText string, stickers map[string]string) (replyText, stickerFileID *string, isRude bool) {
+	text := strings.TrimSpace(rawText)
+	switch {
+	case text == "" || strings.EqualFold(text, skipMarker):
+		// silent skip -- everything stays nil
+	case strings.EqualFold(text, rudeMarker):
+		isRude = true
+		notice := RudeNoticeText
+		replyText = &notice
+	case len(text) > len(stickerPrefix) && strings.EqualFold(text[:len(stickerPrefix)], stickerPrefix):
+		tag := strings.TrimSpace(text[len(stickerPrefix):])
+		if fileID, ok := stickers[tag]; ok {
+			stickerFileID = &fileID
+		}
+		// unknown/hallucinated tag -- falls through as a silent skip
+	default:
+		replyText = &text
+	}
+	return replyText, stickerFileID, isRude
 }
 
 func (s *Service) DecideReply(ctx context.Context, historyText string) Result {
@@ -127,15 +191,13 @@ func (s *Service) DecideReply(ctx context.Context, historyText string) Result {
 			break
 		}
 	}
-	text = strings.TrimSpace(text)
 
-	var replyText *string
-	if text != "" && !strings.EqualFold(text, skipMarker) {
-		replyText = &text
-	}
+	replyText, stickerFileID, isRude := parseModelOutput(text, s.stickers)
 
 	return Result{
 		ReplyText:           replyText,
+		StickerFileID:       stickerFileID,
+		IsRude:              isRude,
 		InputTokens:         msg.Usage.InputTokens,
 		OutputTokens:        msg.Usage.OutputTokens,
 		CacheCreationTokens: msg.Usage.CacheCreationInputTokens,

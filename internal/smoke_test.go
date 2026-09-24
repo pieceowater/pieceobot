@@ -72,6 +72,14 @@ func (m *mockTelegramServer) count() int {
 	return len(m.sent)
 }
 
+func (m *mockTelegramServer) snapshot() []sentMsg {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]sentMsg, len(m.sent))
+	copy(out, m.sent)
+	return out
+}
+
 func (m *mockTelegramServer) last() sentMsg {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -191,4 +199,37 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 		t.Fatalf("scenario C: burst of 3 should produce exactly 1 more send (total 2), got %d", mock.count())
 	}
 	t.Logf("scenario C reply: %q", mock.last().Text)
+
+	// --- Scenario D: a rude message -> canned notice to the customer + owner ping ---
+	svc.HandleUpdate(ctx, b, &models.Update{
+		BusinessMessage: &models.Message{
+			ID: 20, Date: int(now.Unix()), Chat: models.Chat{ID: 3003, Type: models.ChatTypePrivate},
+			From: &models.User{ID: 3003}, Text: "иди нахуй урод", BusinessConnectionID: "connA",
+		},
+	})
+	deadline = time.Now().Add(6 * time.Second)
+	for mock.count() < 4 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if mock.count() < 4 {
+		t.Fatalf("scenario D: expected a customer notice + an owner ping (total >=4 sends), got %d", mock.count())
+	}
+	sent := mock.snapshot()
+	var customerNotice, ownerPing *sentMsg
+	for i := range sent {
+		m := &sent[i]
+		if int64(m.ChatID) == 3003 {
+			customerNotice = m
+		}
+		if int64(m.ChatID) == ownerID && strings.Contains(m.Text, "Грубость") {
+			ownerPing = m
+		}
+	}
+	if customerNotice == nil || customerNotice.Text != llmsvc.RudeNoticeText {
+		t.Fatalf("scenario D: expected customer to receive the canned rude notice, got %+v", customerNotice)
+	}
+	if ownerPing == nil {
+		t.Fatalf("scenario D: expected owner to be notified about the rude message")
+	}
+	t.Logf("scenario D: customer got %q, owner ping %q", customerNotice.Text, ownerPing.Text)
 }
