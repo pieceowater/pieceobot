@@ -97,6 +97,14 @@ func Connect(dbPath string) (*sql.DB, error) {
 	if err := addColumnIfMissing(db, "chat_state", "rate_limit_notice_ts", "INTEGER"); err != nil {
 		return nil, fmt.Errorf("repo: migrate chat_state.rate_limit_notice_ts: %w", err)
 	}
+	if err := addColumnIfMissing(db, "messages", "is_manual", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, fmt.Errorf("repo: migrate messages.is_manual: %w", err)
+	}
+	// Index added after the column migration -- CREATE INDEX at schema-init
+	// time would fail on a pre-migration table that doesn't have the column yet.
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_messages_manual ON messages(is_manual, ts)"); err != nil {
+		return nil, fmt.Errorf("repo: create idx_messages_manual: %w", err)
+	}
 	return db, nil
 }
 

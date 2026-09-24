@@ -16,12 +16,43 @@ type MessagesRepo struct{ db *sql.DB }
 
 func NewMessagesRepo(db *sql.DB) *MessagesRepo { return &MessagesRepo{db: db} }
 
-func (r *MessagesRepo) Add(ctx context.Context, chatID int64, fromMe bool, text string) error {
+// Add stores one message. isManual matters only when fromMe is true -- it
+// marks a genuinely owner-typed reply (as opposed to one this bot
+// generated), which is what RecentManualSamples draws from.
+func (r *MessagesRepo) Add(ctx context.Context, chatID int64, fromMe, isManual bool, text string) error {
 	_, err := r.db.ExecContext(ctx,
-		"INSERT INTO messages (chat_id, from_me, text, ts) VALUES (?, ?, ?, ?)",
-		chatID, boolToInt(fromMe), text, time.Now().Unix(),
+		"INSERT INTO messages (chat_id, from_me, is_manual, text, ts) VALUES (?, ?, ?, ?, ?)",
+		chatID, boolToInt(fromMe), boolToInt(isManual), text, time.Now().Unix(),
 	)
 	return err
+}
+
+// RecentManualSamples returns up to `limit` of the owner's own most recent
+// hand-typed messages across every chat (oldest of the sample first) --
+// generic style exemplars for a chat that doesn't have enough history of
+// its own yet. Deliberately excludes this bot's own generated replies
+// (is_manual=0 for those), or the model would end up imitating itself
+// instead of the real owner.
+func (r *MessagesRepo) RecentManualSamples(ctx context.Context, limit int) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx,
+		"SELECT text FROM messages WHERE from_me = 1 AND is_manual = 1 ORDER BY ts DESC LIMIT ?", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&text); err != nil {
+			return nil, err
+		}
+		out = append(out, text)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, rows.Err()
 }
 
 // Recent returns the last `limit` messages for chatID, oldest first.

@@ -36,6 +36,15 @@ const fallbackEmoji = "🔥"
 // llm_calls (that would recount against the very limit it's reporting).
 const rateLimitNoticeText = "Я бот, устал отвечать тебе — отвечу, когда лимит освободится."
 
+// A chat with fewer than this many of the owner's own messages hasn't
+// established enough tone of its own -- pull in cross-chat style examples
+// (see llmsvc.PrependStyleExamples) rather than relying only on persona.md.
+const minChatHistoryForOwnStyle = 3
+
+// styleExampleCount is how many of the owner's genuinely hand-typed
+// messages (across all chats) to offer as style exemplars.
+const styleExampleCount = 10
+
 type Service struct {
 	cfg          *cfg.Config
 	logger       *slog.Logger
@@ -205,7 +214,7 @@ func (s *Service) handleIncoming(ctx context.Context, b *tgbot.Bot, msg *models.
 			}
 		}
 		if hasText {
-			_ = s.messages.Add(ctx, chatID, true, text)
+			_ = s.messages.Add(ctx, chatID, true, !sentByThisBot, text)
 		}
 		return
 	}
@@ -247,7 +256,7 @@ func (s *Service) handleIncoming(ctx context.Context, b *tgbot.Bot, msg *models.
 		s.logger.Error("set_display_name failed", slog.Any("error", err))
 	}
 	if hasText {
-		_ = s.messages.Add(ctx, chatID, false, text)
+		_ = s.messages.Add(ctx, chatID, false, false, text)
 	}
 	if !hasText {
 		return // media placeholder stored, never replied to
@@ -329,7 +338,7 @@ func (s *Service) maybeNotifyRateLimited(ctx context.Context, b *tgbot.Bot, chat
 		s.logger.Error("failed to send rate-limit notice", slog.Any("error", err))
 		return
 	}
-	if err := s.messages.Add(ctx, chatID, true, rateLimitNoticeText); err != nil {
+	if err := s.messages.Add(ctx, chatID, true, false, rateLimitNoticeText); err != nil {
 		s.logger.Error("failed to store rate-limit notice", slog.Any("error", err))
 	}
 	if err := s.chatState.TouchRateLimitNotice(ctx, chatID); err != nil {
@@ -363,6 +372,24 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 	if historyText == "" {
 		return
 	}
+
+	ownLinesInChat := 0
+	for _, m := range history {
+		if m.FromMe {
+			ownLinesInChat++
+		}
+	}
+	if ownLinesInChat < minChatHistoryForOwnStyle {
+		// New or barely-talked-to contact -- give the model real examples
+		// of the owner's voice from elsewhere instead of relying solely on
+		// persona.md's description.
+		if examples, err := s.messages.RecentManualSamples(ctx, styleExampleCount); err != nil {
+			s.logger.Error("failed to load style examples", slog.Any("error", err))
+		} else if len(examples) > 0 {
+			historyText = llmsvc.PrependStyleExamples(historyText, examples)
+		}
+	}
+
 	latestIncoming := latestIncomingText(history)
 	state, err := s.chatState.Get(ctx, chatID)
 	if err != nil {
@@ -424,7 +451,7 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 			s.logger.Error("failed to send sticker", slog.Any("error", err))
 			return
 		}
-		_ = s.messages.Add(ctx, chatID, true, "[стикер]")
+		_ = s.messages.Add(ctx, chatID, true, false, "[стикер]")
 	} else {
 		if _, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
 			ChatID:               chatID,
@@ -434,7 +461,7 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 			s.logger.Error("failed to send message", slog.Any("error", err))
 			return
 		}
-		_ = s.messages.Add(ctx, chatID, true, *result.ReplyText)
+		_ = s.messages.Add(ctx, chatID, true, false, *result.ReplyText)
 	}
 
 	if err := s.chatState.TouchOutgoing(ctx, chatID); err != nil {

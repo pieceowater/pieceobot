@@ -1,6 +1,9 @@
 package svc
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseModelOutput(t *testing.T) {
 	stickers := map[string]string{"laugh": "FILE_ID_LAUGH", "ok": "FILE_ID_OK"}
@@ -61,4 +64,36 @@ func TestParseModelOutput(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrependStyleExamples(t *testing.T) {
+	t.Run("no examples leaves historyText untouched", func(t *testing.T) {
+		got := PrependStyleExamples("Новое сообщение — отреагируй именно на него:\nОн: привет", nil)
+		want := "Новое сообщение — отреагируй именно на него:\nОн: привет"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty historyText stays empty regardless of examples", func(t *testing.T) {
+		got := PrependStyleExamples("", []string{"го спать"})
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+
+	t.Run("examples are prefixed as Я: lines before the original text", func(t *testing.T) {
+		historyText := "Новое сообщение — отреагируй именно на него:\nОн: привет"
+		got := PrependStyleExamples(historyText, []string{"го спать", "го курить"})
+
+		if !strings.HasPrefix(got, "Примеры твоих реальных сообщений") {
+			t.Errorf("expected examples block header at the start, got %q", got)
+		}
+		if !strings.Contains(got, "Я: го спать") || !strings.Contains(got, "Я: го курить") {
+			t.Errorf("expected both examples rendered as Я: lines, got %q", got)
+		}
+		if !strings.HasSuffix(got, historyText) {
+			t.Errorf("expected the original historyText preserved verbatim at the end, got %q", got)
+		}
+	})
 }

@@ -266,7 +266,7 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 
 	// --- Scenario F: a message left unanswered across a "restart" gets caught up ---
 	const orphanChatID = int64(3005)
-	if err := messagesRepo.Add(ctx, orphanChatID, false, "привет, ты тут?"); err != nil {
+	if err := messagesRepo.Add(ctx, orphanChatID, false, false, "привет, ты тут?"); err != nil {
 		t.Fatalf("scenario F: failed to seed orphan message: %v", err)
 	}
 	if err := chatStateRepo.TouchIncoming(ctx, orphanChatID); err != nil {
@@ -357,4 +357,40 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 	if got := mock.count(); got != sentBefore {
 		t.Fatalf("scenario G: expected no second rate-limit notice within the same window, got %d new send(s)", got-sentBefore)
 	}
+
+	// --- Scenario H: RecentManualSamples only ever returns genuinely
+	// owner-typed messages, never this bot's own generated replies ---
+	samplesBefore, err := messagesRepo.RecentManualSamples(ctx, 100)
+	if err != nil {
+		t.Fatalf("scenario H: RecentManualSamples failed: %v", err)
+	}
+	for _, s := range samplesBefore {
+		if s == rateLimitNoticeTextForTest || strings.Contains(s, "автоответчик") {
+			t.Fatalf("scenario H: bot-generated text leaked into manual samples: %q", s)
+		}
+	}
+	const manualProbe = "это реально я написал руками"
+	if err := messagesRepo.Add(ctx, int64(9999), true, true, manualProbe); err != nil {
+		t.Fatalf("scenario H: failed to seed a manual message: %v", err)
+	}
+	samplesAfter, err := messagesRepo.RecentManualSamples(ctx, 100)
+	if err != nil {
+		t.Fatalf("scenario H: RecentManualSamples failed: %v", err)
+	}
+	found := false
+	for _, s := range samplesAfter {
+		if s == manualProbe {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("scenario H: expected the seeded manual message in RecentManualSamples, got %v", samplesAfter)
+	}
+	if len(samplesAfter) != len(samplesBefore)+1 {
+		t.Fatalf("scenario H: expected exactly one new manual sample, had %d now have %d", len(samplesBefore), len(samplesAfter))
+	}
+	t.Logf("scenario H: manual samples correctly isolated from bot-generated replies (%d total)", len(samplesAfter))
 }
+
+// rateLimitNoticeTextForTest mirrors telegram/svc's unexported rateLimitNoticeText constant
+const rateLimitNoticeTextForTest = "Я бот, устал отвечать тебе — отвечу, когда лимит освободится."

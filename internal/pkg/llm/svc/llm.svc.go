@@ -133,6 +133,26 @@ func BuildHistoryText(messages []repo.Message, c *cfg.Config) string {
 	return sb.String()
 }
 
+// PrependStyleExamples adds a labeled block of the owner's own past
+// messages from OTHER chats ahead of the per-chat history -- used only when
+// this chat doesn't have enough "Я:" lines of its own yet (a new or
+// low-history contact), so the model has real voice examples to draw on
+// instead of just persona.md's hand-written description. See
+// repo.MessagesRepo.RecentManualSamples -- these are always genuinely
+// owner-typed, never this bot's own past output.
+func PrependStyleExamples(historyText string, examples []string) string {
+	if len(examples) == 0 || historyText == "" {
+		return historyText
+	}
+	asMessages := make([]repo.Message, len(examples))
+	for i, ex := range examples {
+		asMessages[i] = repo.Message{FromMe: true, Text: ex}
+	}
+	lines := renderLines(asMessages)
+	return "Примеры твоих реальных сообщений в других переписках (только стиль, не относится к этому разговору):\n" +
+		strings.Join(lines, "\n") + "\n\n" + historyText
+}
+
 func totalLen(lines []string) int {
 	n := 0
 	for _, l := range lines {
