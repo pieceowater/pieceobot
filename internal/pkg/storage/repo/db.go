@@ -94,9 +94,6 @@ func Connect(dbPath string) (*sql.DB, error) {
 	if err := addColumnIfMissing(db, "chat_state", "display_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, fmt.Errorf("repo: migrate chat_state.display_name: %w", err)
 	}
-	if err := addColumnIfMissing(db, "chat_state", "rate_limit_notice_ts", "INTEGER"); err != nil {
-		return nil, fmt.Errorf("repo: migrate chat_state.rate_limit_notice_ts: %w", err)
-	}
 	if err := addColumnIfMissing(db, "messages", "is_manual", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return nil, fmt.Errorf("repo: migrate messages.is_manual: %w", err)
 	}

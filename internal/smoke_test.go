@@ -291,7 +291,10 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 		t.Fatalf("scenario F: expected CatchUpPending to answer the orphaned chat_id=%d", orphanChatID)
 	}
 
-	// --- Scenario G: hitting the per-chat rate limit gets one notice, not repeated silence ---
+	// --- Scenario G: hitting the per-chat rate limit stays silent immediately
+	// (no LLM call, no customer-facing message) -- the automatic retry once
+	// the window clears (debounce.TriggerAfter) is covered by ScheduleAfter's
+	// own semantics plus this same processBatch path, verified live in prod. ---
 	const limitChatID = int64(3006)
 	llmCallCount := func() int {
 		var n int
@@ -326,37 +329,17 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 			From: &models.User{ID: limitChatID}, Text: "привет4", BusinessConnectionID: "connA",
 		},
 	})
-	deadline = time.Now().Add(6 * time.Second)
-	for mock.count() < sentBefore+1 && time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-	}
+	// Give debounce (1s) plenty of margin, then confirm the 4th message
+	// produced neither a new LLM call nor any message to the customer --
+	// blocked chats now stay fully silent until the automatic retry.
+	time.Sleep(3 * time.Second)
 	if got := llmCallCount(); got != 3 {
 		t.Fatalf("scenario G: 4th message should be blocked before any LLM call, llm_calls=%d", got)
 	}
-	var noticeMsg *sentMsg
-	for _, m := range mock.snapshot() {
-		if int64(m.ChatID) == limitChatID {
-			mCopy := m
-			noticeMsg = &mCopy
-		}
-	}
-	if noticeMsg == nil || !strings.Contains(noticeMsg.Text, "устал отвечать") {
-		t.Fatalf("scenario G: expected a rate-limit notice to the customer, got %+v", noticeMsg)
-	}
-	t.Logf("scenario G: rate-limit notice: %q", noticeMsg.Text)
-
-	// A 5th message in the same window must NOT get a second notice.
-	sentBefore = mock.count()
-	svc.HandleUpdate(ctx, b, &models.Update{
-		BusinessMessage: &models.Message{
-			ID: 41, Date: int(now.Unix()), Chat: models.Chat{ID: limitChatID, Type: models.ChatTypePrivate},
-			From: &models.User{ID: limitChatID}, Text: "привет5", BusinessConnectionID: "connA",
-		},
-	})
-	time.Sleep(3 * time.Second)
 	if got := mock.count(); got != sentBefore {
-		t.Fatalf("scenario G: expected no second rate-limit notice within the same window, got %d new send(s)", got-sentBefore)
+		t.Fatalf("scenario G: expected no customer-facing message while rate-limited, got %d new send(s)", got-sentBefore)
 	}
+	t.Log("scenario G: rate-limited chat stayed silent as expected")
 
 	// --- Scenario H: RecentManualSamples only ever returns genuinely
 	// owner-typed messages, never this bot's own generated replies ---
@@ -365,7 +348,7 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 		t.Fatalf("scenario H: RecentManualSamples failed: %v", err)
 	}
 	for _, s := range samplesBefore {
-		if s == rateLimitNoticeTextForTest || strings.Contains(s, "автоответчик") {
+		if strings.Contains(s, "автоответчик") {
 			t.Fatalf("scenario H: bot-generated text leaked into manual samples: %q", s)
 		}
 	}
@@ -391,6 +374,3 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 	}
 	t.Logf("scenario H: manual samples correctly isolated from bot-generated replies (%d total)", len(samplesAfter))
 }
-
-// rateLimitNoticeTextForTest mirrors telegram/svc's unexported rateLimitNoticeText constant
-const rateLimitNoticeTextForTest = "Я бот, устал отвечать тебе — отвечу, когда лимит освободится."

@@ -96,7 +96,6 @@ type ChatState struct {
 	LastOwnerMsgTS    *int64
 	LastMessageFromMe bool
 	DisplayName       string
-	RateLimitNoticeTS *int64
 }
 
 type ChatStateRepo struct{ db *sql.DB }
@@ -105,11 +104,11 @@ func NewChatStateRepo(db *sql.DB) *ChatStateRepo { return &ChatStateRepo{db: db}
 
 func (r *ChatStateRepo) Get(ctx context.Context, chatID int64) (ChatState, error) {
 	row := r.db.QueryRowContext(ctx,
-		"SELECT muted, last_owner_msg_ts, last_message_from_me, display_name, rate_limit_notice_ts FROM chat_state WHERE chat_id = ?", chatID)
+		"SELECT muted, last_owner_msg_ts, last_message_from_me, display_name FROM chat_state WHERE chat_id = ?", chatID)
 	var muted, fromMe int
-	var lastOwnerTS, rateLimitNoticeTS sql.NullInt64
+	var lastOwnerTS sql.NullInt64
 	var displayName string
-	err := row.Scan(&muted, &lastOwnerTS, &fromMe, &displayName, &rateLimitNoticeTS)
+	err := row.Scan(&muted, &lastOwnerTS, &fromMe, &displayName)
 	if err == sql.ErrNoRows {
 		return ChatState{}, nil
 	}
@@ -120,9 +119,6 @@ func (r *ChatStateRepo) Get(ctx context.Context, chatID int64) (ChatState, error
 	if lastOwnerTS.Valid {
 		state.LastOwnerMsgTS = &lastOwnerTS.Int64
 	}
-	if rateLimitNoticeTS.Valid {
-		state.RateLimitNoticeTS = &rateLimitNoticeTS.Int64
-	}
 	return state, nil
 }
 
@@ -132,22 +128,18 @@ func (r *ChatStateRepo) upsert(ctx context.Context, chatID int64, apply func(*Ch
 		return err
 	}
 	apply(&state)
-	var lastOwnerTS, rateLimitNoticeTS any
+	var lastOwnerTS any
 	if state.LastOwnerMsgTS != nil {
 		lastOwnerTS = *state.LastOwnerMsgTS
 	}
-	if state.RateLimitNoticeTS != nil {
-		rateLimitNoticeTS = *state.RateLimitNoticeTS
-	}
 	_, err = r.db.ExecContext(ctx,
-		`INSERT INTO chat_state (chat_id, muted, last_owner_msg_ts, last_message_from_me, display_name, rate_limit_notice_ts)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO chat_state (chat_id, muted, last_owner_msg_ts, last_message_from_me, display_name)
+		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(chat_id) DO UPDATE SET muted=excluded.muted,
 		   last_owner_msg_ts=excluded.last_owner_msg_ts,
 		   last_message_from_me=excluded.last_message_from_me,
-		   display_name=excluded.display_name,
-		   rate_limit_notice_ts=excluded.rate_limit_notice_ts`,
-		chatID, boolToInt(state.Muted), lastOwnerTS, boolToInt(state.LastMessageFromMe), state.DisplayName, rateLimitNoticeTS,
+		   display_name=excluded.display_name`,
+		chatID, boolToInt(state.Muted), lastOwnerTS, boolToInt(state.LastMessageFromMe), state.DisplayName,
 	)
 	return err
 }
@@ -164,13 +156,6 @@ func (r *ChatStateRepo) SetDisplayName(ctx context.Context, chatID int64, name s
 		return nil
 	}
 	return r.upsert(ctx, chatID, func(s *ChatState) { s.DisplayName = name })
-}
-
-// TouchRateLimitNotice records that the chat-rate-limit notice was just
-// sent, so it's only sent once per CHAT_WINDOW_SEC -- ТЗ follow-up.
-func (r *ChatStateRepo) TouchRateLimitNotice(ctx context.Context, chatID int64) error {
-	now := time.Now().Unix()
-	return r.upsert(ctx, chatID, func(s *ChatState) { s.RateLimitNoticeTS = &now })
 }
 
 // TouchOwnerManualMessage: the real owner typed this themselves (not the

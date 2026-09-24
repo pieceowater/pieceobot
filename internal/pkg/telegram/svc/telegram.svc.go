@@ -29,13 +29,6 @@ const processTimeout = 60 * time.Second
 // (persona.md), not a generic smiley.
 const fallbackEmoji = "🔥"
 
-// rateLimitNoticeText is sent to the customer, at most once per
-// CHAT_WINDOW_SEC, when they hit the per-chat reply limit -- ТЗ follow-up:
-// say something instead of going fully silent on every message while
-// limited. A static template, not model output, so it never touches
-// llm_calls (that would recount against the very limit it's reporting).
-const rateLimitNoticeText = "Я бот, устал отвечать тебе — отвечу, когда лимит освободится."
-
 // A chat with fewer than this many of the owner's own messages hasn't
 // established enough tone of its own -- pull in cross-chat style examples
 // (see llmsvc.PrependStyleExamples) rather than relying only on persona.md.
@@ -271,8 +264,8 @@ func (s *Service) handleIncoming(ctx context.Context, b *tgbot.Bot, msg *models.
 
 // shouldConsider also returns the blocking reason (mirrors
 // limiter.CheckAllowed's own reason) so processBatch can react to specific
-// ones -- e.g. "chat_rate" gets a one-time customer notice instead of pure
-// silence, see maybeNotifyRateLimited.
+// ones -- e.g. "chat_rate" gets an automatic retry once the window clears,
+// see processBatch's use of debounce.TriggerAfter.
 func (s *Service) shouldConsider(ctx context.Context, chatID int64) (bool, string) {
 	paused, err := s.limiter.IsPaused(ctx)
 	if err != nil {
@@ -317,38 +310,6 @@ func (s *Service) shouldConsider(ctx context.Context, chatID int64) (bool, strin
 	return allowed, reason
 }
 
-// maybeNotifyRateLimited sends rateLimitNoticeText at most once per
-// CHAT_WINDOW_SEC -- repeated hits of the same limit within that window
-// stay silent, so a customer who keeps messaging while limited doesn't get
-// the notice on every single one of those messages too.
-func (s *Service) maybeNotifyRateLimited(ctx context.Context, b *tgbot.Bot, chatID int64, connID string) {
-	state, err := s.chatState.Get(ctx, chatID)
-	if err != nil {
-		s.logger.Error("failed to load chat_state for rate-limit notice", slog.Any("error", err))
-		return
-	}
-	now := time.Now().Unix()
-	if state.RateLimitNoticeTS != nil && now-*state.RateLimitNoticeTS < int64(s.cfg.ChatWindowSec) {
-		return
-	}
-
-	if _, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
-		ChatID: chatID, Text: rateLimitNoticeText, BusinessConnectionID: connID,
-	}); err != nil {
-		s.logger.Error("failed to send rate-limit notice", slog.Any("error", err))
-		return
-	}
-	if err := s.messages.Add(ctx, chatID, true, false, rateLimitNoticeText); err != nil {
-		s.logger.Error("failed to store rate-limit notice", slog.Any("error", err))
-	}
-	if err := s.chatState.TouchRateLimitNotice(ctx, chatID); err != nil {
-		s.logger.Error("failed to touch rate-limit notice ts", slog.Any("error", err))
-	}
-	if err := s.chatState.TouchOutgoing(ctx, chatID); err != nil {
-		s.logger.Error("touch_outgoing failed", slog.Any("error", err))
-	}
-}
-
 func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, connID string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -358,10 +319,11 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 
 	if allowed, reason := s.shouldConsider(ctx, chatID); !allowed {
 		if reason == "chat_rate" {
-			s.maybeNotifyRateLimited(ctx, b, chatID, connID)
-			// Don't just go silent until another message happens to arrive --
-			// retry once the window that's blocking us has rolled over, and
-			// reply to everything that piled up in the meantime as one batch.
+			// Stay silent to the customer (no "I'm rate limited" notice --
+			// it reads oddly and the retry below makes it unnecessary: don't
+			// just go silent until another message happens to arrive, retry
+			// once the window that's blocking us has rolled over, and reply
+			// to everything that piled up in the meantime as one batch.
 			retryDelay := time.Duration(s.cfg.ChatWindowSec) * time.Second
 			s.debounce.TriggerAfter(chatID, retryDelay, func() {
 				bg, cancel := context.WithTimeout(context.Background(), processTimeout)
