@@ -298,6 +298,8 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 		resultLabel = "sticker"
 	case result.IsRude:
 		resultLabel = "rude"
+	case result.IsAction:
+		resultLabel = "action"
 	case result.ReplyText != nil:
 		resultLabel = "sent"
 	}
@@ -344,10 +346,15 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 		s.logger.Error("touch_outgoing failed", slog.Any("error", err))
 	}
 
-	if result.IsRude {
+	switch {
+	case result.IsRude:
 		// Always tell the owner about rude contacts, independent of
 		// NotifyOnSkip -- this isn't a skip, a reply was actually sent.
 		s.notifyOwnerAboutChat(ctx, b, chatID, fmt.Sprintf("Грубость (id: %d):\n%s", chatID, latestIncoming))
+	case result.IsAction:
+		// Same reasoning -- the customer was told "передал инфу", so the
+		// owner actually needs to see it now, not just on NotifyOnSkip.
+		s.notifyOwnerAboutChat(ctx, b, chatID, fmt.Sprintf("Нужно решение (id: %d):\n%s", chatID, latestIncoming))
 	}
 }
 

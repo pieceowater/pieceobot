@@ -27,6 +27,7 @@ import (
 const (
 	skipMarker      = "SKIP"
 	rudeMarker      = "RUDE"
+	actionMarker    = "ACTION"
 	stickerPrefix   = "STICKER:"
 	charsPerToken   = 3 // conservative estimate for mixed Cyrillic/Latin text
 	maxMessageChars = 500
@@ -37,10 +38,16 @@ const (
 // don't just go silent, let them know a human will see it.
 const RudeNoticeText = "Ваше сообщение передано владельцу этого автоответчика."
 
+// ActionNoticeText is sent to the customer when their message needs the
+// owner's own decision/agreement (money, meetings, promises, "come by",
+// invitations, etc.) -- ТЗ follow-up: acknowledge instead of going silent.
+const ActionNoticeText = "Я автоответчик — спрошу у владельца, передал инфу."
+
 type Result struct {
 	ReplyText           *string
 	StickerFileID       *string
 	IsRude              bool
+	IsAction            bool
 	InputTokens         int64
 	OutputTokens        int64
 	CacheCreationTokens int64
@@ -66,9 +73,7 @@ func ComputeCost(u anthropic.Usage, c *cfg.Config) float64 {
 		float64(u.CacheReadInputTokens)*priceCacheRead
 }
 
-// BuildHistoryText renders messages (oldest first) as compact "Я:"/"Он:"
-// lines, trimmed to HistoryMaxTokens (rough char-based estimate).
-func BuildHistoryText(messages []repo.Message, c *cfg.Config) string {
+func renderLines(messages []repo.Message) []string {
 	lines := make([]string, 0, len(messages))
 	for _, m := range messages {
 		text := strings.ReplaceAll(m.Text, "\n", " ")
@@ -82,12 +87,50 @@ func BuildHistoryText(messages []repo.Message, c *cfg.Config) string {
 		}
 		lines = append(lines, prefix+": "+text)
 	}
+	return lines
+}
+
+// BuildHistoryText renders messages (oldest first) as compact "Я:"/"Он:"
+// lines, split into two labeled sections: background history (trimmed to
+// HistoryMaxTokens, oldest dropped first) and the trailing run of customer
+// messages that haven't been reacted to yet. The split matters -- without
+// it, a model judging the whole blob at once tends to carry a prior rude
+// message's tone onto an unrelated new one (observed: "го курить" right
+// after "пошел нахуй" got classified RUDE by association). See baseRules'
+// instruction to judge only the "Новое сообщение" section.
+func BuildHistoryText(messages []repo.Message, c *cfg.Config) string {
+	if len(messages) == 0 {
+		return ""
+	}
+
+	splitIdx := len(messages)
+	for splitIdx > 0 && !messages[splitIdx-1].FromMe {
+		splitIdx--
+	}
+	background, newTurn := messages[:splitIdx], messages[splitIdx:]
+	if len(newTurn) == 0 {
+		// Defensive only -- processBatch always calls this right after
+		// storing a genuine new customer message, so this shouldn't happen.
+		background, newTurn = nil, messages
+	}
+
+	bgLines := renderLines(background)
+	newLines := renderLines(newTurn)
 
 	maxChars := c.HistoryMaxTokens * charsPerToken
-	for len(lines) > 0 && totalLen(lines) > maxChars {
-		lines = lines[1:]
+	for len(bgLines) > 0 && totalLen(bgLines)+totalLen(newLines) > maxChars {
+		bgLines = bgLines[1:]
 	}
-	return strings.Join(lines, "\n")
+
+	var sb strings.Builder
+	if len(bgLines) > 0 {
+		sb.WriteString("История (только для тона и общего фона):\n")
+		sb.WriteString(strings.Join(bgLines, "\n"))
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("Новое сообщение — отреагируй именно на него:\n")
+	sb.WriteString(strings.Join(newLines, "\n"))
+	return sb.String()
 }
 
 func totalLen(lines []string) int {
@@ -169,10 +212,10 @@ func stickerInstructions(stickers map[string]string) string {
 }
 
 // parseModelOutput interprets the model's raw text: SKIP -> silent (all nil),
-// RUDE -> the canned customer-facing notice, STICKER:<tag> -> a resolved
-// file_id (or a silent skip if the tag is unknown/hallucinated), anything
-// else -> a normal reply. Pure function, no I/O -- see llm_test.go.
-func parseModelOutput(rawText string, stickers map[string]string) (replyText, stickerFileID *string, isRude bool) {
+// RUDE/ACTION -> their canned customer-facing notices, STICKER:<tag> -> a
+// resolved file_id (or a silent skip if the tag is unknown/hallucinated),
+// anything else -> a normal reply. Pure function, no I/O -- see llm_test.go.
+func parseModelOutput(rawText string, stickers map[string]string) (replyText, stickerFileID *string, isRude, isAction bool) {
 	text := strings.TrimSpace(rawText)
 	switch {
 	case text == "" || strings.EqualFold(text, skipMarker):
@@ -180,6 +223,10 @@ func parseModelOutput(rawText string, stickers map[string]string) (replyText, st
 	case strings.EqualFold(text, rudeMarker):
 		isRude = true
 		notice := RudeNoticeText
+		replyText = &notice
+	case strings.EqualFold(text, actionMarker):
+		isAction = true
+		notice := ActionNoticeText
 		replyText = &notice
 	case len(text) > len(stickerPrefix) && strings.EqualFold(text[:len(stickerPrefix)], stickerPrefix):
 		tag := strings.TrimSpace(text[len(stickerPrefix):])
@@ -190,7 +237,7 @@ func parseModelOutput(rawText string, stickers map[string]string) (replyText, st
 	default:
 		replyText = &text
 	}
-	return replyText, stickerFileID, isRude
+	return replyText, stickerFileID, isRude, isAction
 }
 
 func (s *Service) DecideReply(ctx context.Context, historyText string) Result {
@@ -214,12 +261,13 @@ func (s *Service) DecideReply(ctx context.Context, historyText string) Result {
 		}
 	}
 
-	replyText, stickerFileID, isRude := parseModelOutput(text, s.stickers)
+	replyText, stickerFileID, isRude, isAction := parseModelOutput(text, s.stickers)
 
 	return Result{
 		ReplyText:           replyText,
 		StickerFileID:       stickerFileID,
 		IsRude:              isRude,
+		IsAction:            isAction,
 		InputTokens:         msg.Usage.InputTokens,
 		OutputTokens:        msg.Usage.OutputTokens,
 		CacheCreationTokens: msg.Usage.CacheCreationInputTokens,

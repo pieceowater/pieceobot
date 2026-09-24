@@ -232,4 +232,35 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 		t.Fatalf("scenario D: expected owner to be notified about the rude message")
 	}
 	t.Logf("scenario D: customer got %q, owner ping %q", customerNotice.Text, ownerPing.Text)
+
+	// --- Scenario E: a request needing the owner's decision -> canned notice + owner ping ---
+	svc.HandleUpdate(ctx, b, &models.Update{
+		BusinessMessage: &models.Message{
+			ID: 21, Date: int(now.Unix()), Chat: models.Chat{ID: 3004, Type: models.ChatTypePrivate},
+			From: &models.User{ID: 3004}, Text: "скинь 5000 тенге до завтра, очень надо", BusinessConnectionID: "connA",
+		},
+	})
+	deadline = time.Now().Add(6 * time.Second)
+	sentBefore := mock.count()
+	for mock.count() < sentBefore+2 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	sent = mock.snapshot()
+	var actionNotice, actionOwnerPing *sentMsg
+	for i := range sent {
+		m := &sent[i]
+		if int64(m.ChatID) == 3004 {
+			actionNotice = m
+		}
+		if int64(m.ChatID) == ownerID && strings.Contains(m.Text, "Нужно решение") {
+			actionOwnerPing = m
+		}
+	}
+	if actionNotice == nil || actionNotice.Text != llmsvc.ActionNoticeText {
+		t.Fatalf("scenario E: expected customer to receive the canned action notice, got %+v", actionNotice)
+	}
+	if actionOwnerPing == nil {
+		t.Fatalf("scenario E: expected owner to be notified about the pending decision")
+	}
+	t.Logf("scenario E: customer got %q, owner ping %q", actionNotice.Text, actionOwnerPing.Text)
 }
