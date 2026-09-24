@@ -246,12 +246,15 @@ func parseModelOutput(rawText string, stickers map[string]string) (replyText, st
 // the SDK reads the stream as fast as it arrives) is lower than waiting for
 // the server to buffer the whole (short, max ~150-token) reply first.
 func (s *Service) DecideReply(ctx context.Context, historyText string) Result {
+	// No `temperature` -- current-generation models (Sonnet 5, Opus 5+)
+	// reject it outright (400 "temperature is deprecated for this model"),
+	// while older ones like Haiku 4.5 merely accept it. Omitting it works
+	// on every model, so LLM_MODEL can be swapped without this breaking.
 	stream := s.client.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
-		Model:       s.cfg.LLMModel,
-		MaxTokens:   s.cfg.MaxOutputTokens,
-		Temperature: anthropic.Float(0.7),
-		System:      []anthropic.TextBlockParam{{Text: s.systemPrompt}},
-		Messages:    []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(historyText))},
+		Model:     s.cfg.LLMModel,
+		MaxTokens: s.cfg.MaxOutputTokens,
+		System:    []anthropic.TextBlockParam{{Text: s.systemPrompt}},
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(historyText))},
 	})
 	defer stream.Close()
 
