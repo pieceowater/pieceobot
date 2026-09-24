@@ -1,0 +1,11 @@
+# tag: file_id, один на строку. "ok" — запасной вариант для голого стикера,
+# если по смыслу ничего точнее не подошло (см. FallbackStickerFileID).
+
+kaspi: CAACAgIAAxkBAAEH1NxqtMTYmlihndMz3m760ngFMG7euAACpU4AAuKXGEvaHI8dx7bEUj0E
+прикольчик: CAACAgIAAxkBAAMIarTHvf8vyFdpYyl0vE8jDqu-kUkAAnp3AAIyqLhIg96jiQFx_rg9BA
+грустно: CAACAgIAAxkBAAMKarTHwKNqVCCQKu3YVBpG3c5Hz_oAAoI0AAIW9pBJbhTdPY37dNU9BA
+вежливый: CAACAgIAAxkBAAMMarTHw8ri1khMzUi8e4lUT9yoQ8gAAlQ0AAJRv4hJqTbrjJOnIjg9BA
+ok: CAACAgIAAxkBAAMMarTHw8ri1khMzUi8e4lUT9yoQ8gAAlQ0AAJRv4hJqTbrjJOnIjg9BA
+круто: CAACAgIAAxkBAAMOarTH20rQn3YbxvSxdBqAUqx1j0EAAsw3AAKx6oFKrsuQOaNu0YU9BA
+нет_денег: CAACAgIAAxkBAAMQarTH4R91Gf46dBi24KEh64ssLnwAAjd3AAIORYhKVaiZg3RVjrw9BA
+ржака: CAACAgIAAxkBAAMSarTH5FK4ElqESv8xj-4MI4lVChIAAkEAAzyKVxogmx2BPCogYD0E

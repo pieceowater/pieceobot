@@ -24,6 +24,11 @@ import (
 
 const processTimeout = 60 * time.Second
 
+// fallbackEmoji is the last-resort reply to a bare sticker when no
+// stickers.md tag matches -- picked from the owner's own emoji whitelist
+// (persona.md), not a generic smiley.
+const fallbackEmoji = "🔥"
+
 type Service struct {
 	cfg          *cfg.Config
 	logger       *slog.Logger
@@ -274,12 +279,13 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 
 	// A bare sticker must never go silent (ТЗ follow-up) -- if the model
 	// skipped it anyway, force a reply: a configured sticker if we have
-	// one, else a plain emoji acknowledgement.
+	// one, else a plain emoji acknowledgement (from persona.md's own
+	// whitelist, not a generic smiley -- see fallbackEmoji).
 	if result.IsSkip() && isStickerOnlyBatch(latestIncoming) {
 		if fileID, ok := s.llm.FallbackStickerFileID(); ok {
 			result.StickerFileID = &fileID
 		} else {
-			fallback := "😄"
+			fallback := fallbackEmoji
 			result.ReplyText = &fallback
 		}
 	}

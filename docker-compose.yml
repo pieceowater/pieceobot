@@ -7,6 +7,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./persona.md:/app/persona.md:ro
+      - ./stickers.md:/app/stickers.md:ro
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f service || exit 1"]
       interval: 30s
