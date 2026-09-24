@@ -318,13 +318,19 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 	}()
 
 	if allowed, reason := s.shouldConsider(ctx, chatID); !allowed {
-		if reason == "chat_rate" {
-			// Stay silent to the customer (no "I'm rate limited" notice --
-			// it reads oddly and the retry below makes it unnecessary: don't
-			// just go silent until another message happens to arrive, retry
-			// once the window that's blocking us has rolled over, and reply
-			// to everything that piled up in the meantime as one batch.
-			retryDelay := time.Duration(s.cfg.ChatWindowSec) * time.Second
+		// Both of these are temporary, time-based blocks (unlike a content
+		// decision like SKIP, which won't change on retry) -- stay silent to
+		// the customer and retry once the block should have cleared, rather
+		// than going quiet until another message happens to arrive. Whatever
+		// piled up in the meantime gets answered as one batch.
+		var retryDelay time.Duration
+		switch reason {
+		case "chat_rate":
+			retryDelay = time.Duration(s.cfg.ChatWindowSec) * time.Second
+		case "owner_active":
+			retryDelay = time.Duration(s.cfg.OwnerActivePauseMin) * time.Minute
+		}
+		if retryDelay > 0 {
 			s.debounce.TriggerAfter(chatID, retryDelay, func() {
 				bg, cancel := context.WithTimeout(context.Background(), processTimeout)
 				defer cancel()
