@@ -413,8 +413,18 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 	}
 
 	if result.Error || (result.ReplyText == nil && result.StickerFileID == nil) {
-		if result.IsSkip() && s.cfg.NotifyOnSkip {
-			s.notifyOwner(ctx, b, fmt.Sprintf("Пропустил (%s):\n%s", contact, latestIncoming))
+		if result.IsSkip() {
+			// A completed SKIP is still a considered decision, not an
+			// unanswered message -- mark it handled so CatchUpPending (every
+			// restart) doesn't keep re-deciding the same message and
+			// re-notifying the owner about it every time. An API error is
+			// NOT marked, so it's retried on the next restart/catch-up.
+			if err := s.chatState.TouchOutgoing(ctx, chatID); err != nil {
+				s.logger.Error("touch_outgoing failed", slog.Any("error", err))
+			}
+			if s.cfg.NotifyOnSkip {
+				s.notifyOwner(ctx, b, fmt.Sprintf("Пропустил (%s):\n%s", contact, latestIncoming))
+			}
 		}
 		return
 	}
