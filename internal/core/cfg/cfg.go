@@ -85,7 +85,7 @@ func Inst() *Config {
 
 			OwnerActivePauseMin: getEnvInt("OWNER_ACTIVE_PAUSE_MIN", 30),
 
-			DailyBudgetUSD:     getEnvFloat("DAILY_BUDGET_USD", 1.0),
+			DailyBudgetUSD:     getEnvFloat("DAILY_BUDGET_USD", 1.5),
 			MonthlyBudgetUSD:   getEnvFloat("MONTHLY_BUDGET_USD", 15.0),
 			PriceInputPerMTok:  getEnvFloat("PRICE_INPUT_PER_MTOK", 1.00),
 			PriceOutputPerMTok: getEnvFloat("PRICE_OUTPUT_PER_MTOK", 5.00),
