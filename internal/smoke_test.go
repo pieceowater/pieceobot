@@ -225,8 +225,8 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 			ownerPing = m
 		}
 	}
-	if customerNotice == nil || customerNotice.Text != llmsvc.RudeNoticeText {
-		t.Fatalf("scenario D: expected customer to receive the canned rude notice, got %+v", customerNotice)
+	if customerNotice == nil || customerNotice.Text != "<i>"+llmsvc.RudeNoticeText+"</i>" {
+		t.Fatalf("scenario D: expected customer to receive the canned rude notice (italicized), got %+v", customerNotice)
 	}
 	if ownerPing == nil {
 		t.Fatalf("scenario D: expected owner to be notified about the rude message")
@@ -256,8 +256,8 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 			actionOwnerPing = m
 		}
 	}
-	if actionNotice == nil || actionNotice.Text != llmsvc.ActionNoticeText {
-		t.Fatalf("scenario E: expected customer to receive the canned action notice, got %+v", actionNotice)
+	if actionNotice == nil || actionNotice.Text != "<i>"+llmsvc.ActionNoticeText+"</i>" {
+		t.Fatalf("scenario E: expected customer to receive the canned action notice (italicized), got %+v", actionNotice)
 	}
 	if actionOwnerPing == nil {
 		t.Fatalf("scenario E: expected owner to be notified about the pending decision")

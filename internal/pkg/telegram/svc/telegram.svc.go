@@ -183,6 +183,15 @@ func displayName(u *models.User) string {
 	return name
 }
 
+// htmlEscape escapes the three characters Telegram's HTML parse mode treats
+// specially. Customer-facing replies are wrapped in <i></i> (ТЗ follow-up:
+// italicize every bot-sent message so it's visually distinguishable from
+// the owner's own typing) -- the model's free-form text could otherwise
+// contain "&"/"<"/">" and break the tag or get rejected outright.
+var htmlEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
+func htmlEscape(s string) string { return htmlEscaper.Replace(s) }
+
 func (s *Service) handleIncoming(ctx context.Context, b *tgbot.Bot, msg *models.Message) {
 	connID := msg.BusinessConnectionID
 	if connID == "" || msg.Chat.Type != models.ChatTypePrivate || msg.From == nil {
@@ -442,7 +451,8 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 	} else {
 		if _, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
 			ChatID:               chatID,
-			Text:                 *result.ReplyText,
+			Text:                 "<i>" + htmlEscape(*result.ReplyText) + "</i>",
+			ParseMode:            models.ParseModeHTML,
 			BusinessConnectionID: connID,
 		}); err != nil {
 			s.logger.Error("failed to send message", slog.Any("error", err))
