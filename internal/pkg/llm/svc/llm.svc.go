@@ -235,14 +235,24 @@ func stickerInstructions(stickers map[string]string) string {
 // RUDE/ACTION -> their canned customer-facing notices, STICKER:<tag> -> a
 // resolved file_id (or a silent skip if the tag is unknown/hallucinated),
 // anything else -> a normal reply. Pure function, no I/O -- see llm_test.go.
+//
+// RUDE may be followed by an optional model-written comeback line (baseRules
+// asks for a short in-character quip before the canned notice, but only when
+// the message reads as banter rather than genuine hostility) -- that line is
+// prepended to RudeNoticeText, never sent alone, so the customer always still
+// gets the "passed to the owner" disclosure regardless of what the model wrote.
 func parseModelOutput(rawText string, stickers map[string]string) (replyText, stickerFileID *string, isRude, isAction bool) {
 	text := strings.TrimSpace(rawText)
 	switch {
 	case text == "" || strings.EqualFold(text, skipMarker):
 		// silent skip -- everything stays nil
-	case strings.EqualFold(text, rudeMarker):
+	case strings.EqualFold(text, rudeMarker) || strings.HasPrefix(strings.ToUpper(text), rudeMarker+"\n"):
 		isRude = true
+		comeback := strings.TrimSpace(text[len(rudeMarker):])
 		notice := RudeNoticeText
+		if comeback != "" {
+			notice = comeback + "\n\n" + RudeNoticeText
+		}
 		replyText = &notice
 	case strings.EqualFold(text, actionMarker):
 		isAction = true

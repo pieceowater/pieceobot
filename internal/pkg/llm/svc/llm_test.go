@@ -23,6 +23,8 @@ func TestParseModelOutput(t *testing.T) {
 		{name: "empty", raw: "", wantReply: ""},
 		{name: "rude", raw: "RUDE", wantReply: RudeNoticeText, wantRude: true},
 		{name: "rude lowercase", raw: "rude", wantReply: RudeNoticeText, wantRude: true},
+		{name: "rude with comeback", raw: "RUDE\nха, сам такой", wantReply: "ха, сам такой\n\n" + RudeNoticeText, wantRude: true},
+		{name: "rude lowercase with comeback", raw: "rude\nну ты и наглец", wantReply: "ну ты и наглец\n\n" + RudeNoticeText, wantRude: true},
 		{name: "action", raw: "ACTION", wantReply: ActionNoticeText, wantAction: true},
 		{name: "action lowercase", raw: "action", wantReply: ActionNoticeText, wantAction: true},
 		{name: "known sticker tag", raw: "STICKER:laugh", wantSticker: "FILE_ID_LAUGH"},

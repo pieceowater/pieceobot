@@ -225,7 +225,11 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 			ownerPing = m
 		}
 	}
-	if customerNotice == nil || customerNotice.Text != "<i>"+llmsvc.RudeNoticeText+"</i>" {
+	// The model may prepend a short in-character comeback ahead of the canned
+	// notice (see parseModelOutput) -- assert the notice is present and
+	// italicized rather than exact-matching the whole message.
+	if customerNotice == nil || !strings.HasPrefix(customerNotice.Text, "<i>") ||
+		!strings.HasSuffix(customerNotice.Text, llmsvc.RudeNoticeText+"</i>") {
 		t.Fatalf("scenario D: expected customer to receive the canned rude notice (italicized), got %+v", customerNotice)
 	}
 	if ownerPing == nil {
