@@ -123,6 +123,24 @@ func (s *Service) CheckAllowed(ctx context.Context, chatID int64) (bool, string,
 	return true, "", nil
 }
 
+// RetryDelayForChatDaily returns how long until a "chat_daily" block for
+// this chat clears -- the moment its oldest call within the 24h window ages
+// out of it, rather than a guessed delay (the window is rolling, not
+// calendar-day, so the clear time isn't a fixed offset from now). ok is
+// false when there's nothing to wait on (e.g. the block already cleared).
+func (s *Service) RetryDelayForChatDaily(ctx context.Context, chatID int64) (delay time.Duration, ok bool, err error) {
+	oldest, found, err := s.calls.OldestSinceForChat(ctx, time.Now().Unix()-86400, chatID)
+	if err != nil || !found {
+		return 0, false, err
+	}
+	unblockAt := oldest + 86400
+	remaining := unblockAt - time.Now().Unix()
+	if remaining <= 0 {
+		return 0, false, nil
+	}
+	return time.Duration(remaining+1) * time.Second, true, nil
+}
+
 // RecordAndMaybePause records the call and returns true iff this call just
 // pushed spend over budget and the bot was not already paused (caller
 // should notify the owner).

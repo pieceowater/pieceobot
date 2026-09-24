@@ -81,7 +81,7 @@ func Inst() *Config {
 			GlobalWindowSec: getEnvInt("GLOBAL_WINDOW_SEC", 120),
 			ChatLimit:       getEnvInt("CHAT_LIMIT", 3),
 			ChatWindowSec:   getEnvInt("CHAT_WINDOW_SEC", 300),
-			ChatDailyLimit:  getEnvInt("CHAT_DAILY_LIMIT", 20),
+			ChatDailyLimit:  getEnvInt("CHAT_DAILY_LIMIT", 200),
 
 			OwnerActivePauseMin: getEnvInt("OWNER_ACTIVE_PAUSE_MIN", 30),
 

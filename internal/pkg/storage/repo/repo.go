@@ -323,6 +323,20 @@ func (r *LlmCallsRepo) CountSinceForChat(ctx context.Context, cutoffTS, chatID i
 	return n, err
 }
 
+// OldestSinceForChat returns the ts of the oldest call counted in a
+// [cutoffTS, now) window for a chat -- used to compute exactly when a
+// chat_daily block clears (the moment that call ages out of the window),
+// rather than guessing a retry delay. ok is false if the chat has no calls
+// in the window at all.
+func (r *LlmCallsRepo) OldestSinceForChat(ctx context.Context, cutoffTS, chatID int64) (ts int64, ok bool, err error) {
+	var v sql.NullInt64
+	err = r.db.QueryRowContext(ctx, "SELECT MIN(ts) FROM llm_calls WHERE ts >= ? AND chat_id = ?", cutoffTS, chatID).Scan(&v)
+	if err != nil {
+		return 0, false, err
+	}
+	return v.Int64, v.Valid, nil
+}
+
 func (r *LlmCallsRepo) CostSince(ctx context.Context, cutoffTS int64) (float64, error) {
 	var cost float64
 	err := r.db.QueryRowContext(ctx, "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls WHERE ts >= ?", cutoffTS).Scan(&cost)
