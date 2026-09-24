@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -49,6 +50,8 @@ CREATE TABLE IF NOT EXISTS chat_state (
     last_owner_msg_ts INTEGER,
     last_message_from_me INTEGER NOT NULL DEFAULT 0
 );
+-- display_name added later via the migration below -- CREATE TABLE IF NOT
+-- EXISTS doesn't alter an already-existing table.
 
 -- One row per active Telegram Business connection, refreshed on every
 -- business_connection update. is_owner gates everything in telegram/svc --
@@ -88,5 +91,23 @@ func Connect(dbPath string) (*sql.DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("repo: apply schema: %w", err)
 	}
+	if err := addColumnIfMissing(db, "chat_state", "display_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, fmt.Errorf("repo: migrate chat_state.display_name: %w", err)
+	}
+	if err := addColumnIfMissing(db, "chat_state", "rate_limit_notice_ts", "INTEGER"); err != nil {
+		return nil, fmt.Errorf("repo: migrate chat_state.rate_limit_notice_ts: %w", err)
+	}
 	return db, nil
+}
+
+// addColumnIfMissing runs an idempotent ALTER TABLE ... ADD COLUMN -- the
+// lightweight migration path for a schema that only ever grows columns.
+// SQLite has no "ADD COLUMN IF NOT EXISTS", so a duplicate-column error is
+// the expected, ignored outcome on every run after the first.
+func addColumnIfMissing(db *sql.DB, table, column, def string) error {
+	_, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, def))
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	return nil
 }

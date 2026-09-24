@@ -290,4 +290,71 @@ func TestBusinessPipelineOwnershipGuardAndDebounce(t *testing.T) {
 	if !orphanAnswered {
 		t.Fatalf("scenario F: expected CatchUpPending to answer the orphaned chat_id=%d", orphanChatID)
 	}
+
+	// --- Scenario G: hitting the per-chat rate limit gets one notice, not repeated silence ---
+	const limitChatID = int64(3006)
+	llmCallCount := func() int {
+		var n int
+		_ = sqlDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM llm_calls WHERE chat_id = ?", limitChatID).Scan(&n)
+		return n
+	}
+	for i, txt := range []string{"привет1", "привет2", "привет3"} {
+		before := llmCallCount()
+		svc.HandleUpdate(ctx, b, &models.Update{
+			BusinessMessage: &models.Message{
+				ID: 30 + i, Date: int(now.Unix()), Chat: models.Chat{ID: limitChatID, Type: models.ChatTypePrivate},
+				From: &models.User{ID: limitChatID}, Text: txt, BusinessConnectionID: "connA",
+			},
+		})
+		deadline = time.Now().Add(6 * time.Second)
+		for llmCallCount() < before+1 && time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+		}
+		// llm_calls is written just before the actual SendMessage call in
+		// processBatch, so the reply itself may still be in flight here --
+		// let it settle before the next message's Trigger captures a count.
+		time.Sleep(500 * time.Millisecond)
+	}
+	if got := llmCallCount(); got != 3 {
+		t.Fatalf("scenario G: expected 3 llm_calls before hitting CHAT_LIMIT, got %d", got)
+	}
+
+	sentBefore = mock.count()
+	svc.HandleUpdate(ctx, b, &models.Update{
+		BusinessMessage: &models.Message{
+			ID: 40, Date: int(now.Unix()), Chat: models.Chat{ID: limitChatID, Type: models.ChatTypePrivate},
+			From: &models.User{ID: limitChatID}, Text: "привет4", BusinessConnectionID: "connA",
+		},
+	})
+	deadline = time.Now().Add(6 * time.Second)
+	for mock.count() < sentBefore+1 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got := llmCallCount(); got != 3 {
+		t.Fatalf("scenario G: 4th message should be blocked before any LLM call, llm_calls=%d", got)
+	}
+	var noticeMsg *sentMsg
+	for _, m := range mock.snapshot() {
+		if int64(m.ChatID) == limitChatID {
+			mCopy := m
+			noticeMsg = &mCopy
+		}
+	}
+	if noticeMsg == nil || !strings.Contains(noticeMsg.Text, "устал отвечать") {
+		t.Fatalf("scenario G: expected a rate-limit notice to the customer, got %+v", noticeMsg)
+	}
+	t.Logf("scenario G: rate-limit notice: %q", noticeMsg.Text)
+
+	// A 5th message in the same window must NOT get a second notice.
+	sentBefore = mock.count()
+	svc.HandleUpdate(ctx, b, &models.Update{
+		BusinessMessage: &models.Message{
+			ID: 41, Date: int(now.Unix()), Chat: models.Chat{ID: limitChatID, Type: models.ChatTypePrivate},
+			From: &models.User{ID: limitChatID}, Text: "привет5", BusinessConnectionID: "connA",
+		},
+	})
+	time.Sleep(3 * time.Second)
+	if got := mock.count(); got != sentBefore {
+		t.Fatalf("scenario G: expected no second rate-limit notice within the same window, got %d new send(s)", got-sentBefore)
+	}
 }

@@ -29,6 +29,13 @@ const processTimeout = 60 * time.Second
 // (persona.md), not a generic smiley.
 const fallbackEmoji = "🔥"
 
+// rateLimitNoticeText is sent to the customer, at most once per
+// CHAT_WINDOW_SEC, when they hit the per-chat reply limit -- ТЗ follow-up:
+// say something instead of going fully silent on every message while
+// limited. A static template, not model output, so it never touches
+// llm_calls (that would recount against the very limit it's reporting).
+const rateLimitNoticeText = "Я бот, устал отвечать тебе — отвечу, когда лимит освободится."
+
 type Service struct {
 	cfg          *cfg.Config
 	logger       *slog.Logger
@@ -160,6 +167,20 @@ func extractText(msg *models.Message) (string, bool) {
 	return "", false
 }
 
+// displayName builds a human-readable name for owner notifications --
+// first+last name, falling back to @username on the rare account with no
+// first name set.
+func displayName(u *models.User) string {
+	name := strings.TrimSpace(u.FirstName)
+	if u.LastName != "" {
+		name = strings.TrimSpace(name + " " + u.LastName)
+	}
+	if name == "" && u.Username != "" {
+		name = "@" + u.Username
+	}
+	return name
+}
+
 func (s *Service) handleIncoming(ctx context.Context, b *tgbot.Bot, msg *models.Message) {
 	connID := msg.BusinessConnectionID
 	if connID == "" || msg.Chat.Type != models.ChatTypePrivate || msg.From == nil {
@@ -222,6 +243,9 @@ func (s *Service) handleIncoming(ctx context.Context, b *tgbot.Bot, msg *models.
 	if err := s.chatState.TouchIncoming(ctx, chatID); err != nil {
 		s.logger.Error("touch_incoming failed", slog.Any("error", err))
 	}
+	if err := s.chatState.SetDisplayName(ctx, chatID, displayName(msg.From)); err != nil {
+		s.logger.Error("set_display_name failed", slog.Any("error", err))
+	}
 	if hasText {
 		_ = s.messages.Add(ctx, chatID, false, text)
 	}
@@ -236,48 +260,84 @@ func (s *Service) handleIncoming(ctx context.Context, b *tgbot.Bot, msg *models.
 	})
 }
 
-func (s *Service) shouldConsider(ctx context.Context, chatID int64) bool {
+// shouldConsider also returns the blocking reason (mirrors
+// limiter.CheckAllowed's own reason) so processBatch can react to specific
+// ones -- e.g. "chat_rate" gets a one-time customer notice instead of pure
+// silence, see maybeNotifyRateLimited.
+func (s *Service) shouldConsider(ctx context.Context, chatID int64) (bool, string) {
 	paused, err := s.limiter.IsPaused(ctx)
 	if err != nil {
 		s.logger.Error("is_paused check failed", slog.Any("error", err))
-		return false
+		return false, "error"
 	}
 	if paused {
-		return false
+		return false, "paused"
 	}
 	if _, blocked := s.cfg.Blacklist[chatID]; blocked {
-		return false
+		return false, "blacklist"
 	}
 	if len(s.cfg.Whitelist) > 0 {
 		if _, allowed := s.cfg.Whitelist[chatID]; !allowed {
-			return false
+			return false, "whitelist"
 		}
 	}
 
 	state, err := s.chatState.Get(ctx, chatID)
 	if err != nil {
 		s.logger.Error("chat_state get failed", slog.Any("error", err))
-		return false
+		return false, "error"
 	}
 	if state.Muted {
-		return false
+		return false, "muted"
 	}
 	if state.LastOwnerMsgTS != nil {
 		elapsedMin := float64(time.Now().Unix()-*state.LastOwnerMsgTS) / 60
 		if elapsedMin < float64(s.cfg.OwnerActivePauseMin) {
-			return false
+			return false, "owner_active"
 		}
 	}
 	if state.LastMessageFromMe {
-		return false
+		return false, "already_answered"
 	}
 
-	allowed, _, err := s.limiter.CheckAllowed(ctx, chatID)
+	allowed, reason, err := s.limiter.CheckAllowed(ctx, chatID)
 	if err != nil {
 		s.logger.Error("limiter check failed", slog.Any("error", err))
-		return false
+		return false, "error"
 	}
-	return allowed
+	return allowed, reason
+}
+
+// maybeNotifyRateLimited sends rateLimitNoticeText at most once per
+// CHAT_WINDOW_SEC -- repeated hits of the same limit within that window
+// stay silent, so a customer who keeps messaging while limited doesn't get
+// the notice on every single one of those messages too.
+func (s *Service) maybeNotifyRateLimited(ctx context.Context, b *tgbot.Bot, chatID int64, connID string) {
+	state, err := s.chatState.Get(ctx, chatID)
+	if err != nil {
+		s.logger.Error("failed to load chat_state for rate-limit notice", slog.Any("error", err))
+		return
+	}
+	now := time.Now().Unix()
+	if state.RateLimitNoticeTS != nil && now-*state.RateLimitNoticeTS < int64(s.cfg.ChatWindowSec) {
+		return
+	}
+
+	if _, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
+		ChatID: chatID, Text: rateLimitNoticeText, BusinessConnectionID: connID,
+	}); err != nil {
+		s.logger.Error("failed to send rate-limit notice", slog.Any("error", err))
+		return
+	}
+	if err := s.messages.Add(ctx, chatID, true, rateLimitNoticeText); err != nil {
+		s.logger.Error("failed to store rate-limit notice", slog.Any("error", err))
+	}
+	if err := s.chatState.TouchRateLimitNotice(ctx, chatID); err != nil {
+		s.logger.Error("failed to touch rate-limit notice ts", slog.Any("error", err))
+	}
+	if err := s.chatState.TouchOutgoing(ctx, chatID); err != nil {
+		s.logger.Error("touch_outgoing failed", slog.Any("error", err))
+	}
 }
 
 func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, connID string) {
@@ -287,7 +347,10 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 		}
 	}()
 
-	if !s.shouldConsider(ctx, chatID) {
+	if allowed, reason := s.shouldConsider(ctx, chatID); !allowed {
+		if reason == "chat_rate" {
+			s.maybeNotifyRateLimited(ctx, b, chatID, connID)
+		}
 		return
 	}
 
@@ -301,6 +364,11 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 		return
 	}
 	latestIncoming := latestIncomingText(history)
+	state, err := s.chatState.Get(ctx, chatID)
+	if err != nil {
+		s.logger.Error("failed to load chat_state for notification", slog.Any("error", err))
+	}
+	contact := contactLabel(state.DisplayName, chatID)
 
 	result := s.llm.DecideReply(ctx, historyText)
 
@@ -342,7 +410,7 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 
 	if result.Error || (result.ReplyText == nil && result.StickerFileID == nil) {
 		if result.IsSkip() && s.cfg.NotifyOnSkip {
-			s.notifyOwnerAboutChat(ctx, b, chatID, fmt.Sprintf("Пропустил (id: %d):\n%s", chatID, latestIncoming))
+			s.notifyOwner(ctx, b, fmt.Sprintf("Пропустил (%s):\n%s", contact, latestIncoming))
 		}
 		return
 	}
@@ -377,47 +445,31 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 	case result.IsRude:
 		// Always tell the owner about rude contacts, independent of
 		// NotifyOnSkip -- this isn't a skip, a reply was actually sent.
-		s.notifyOwnerAboutChat(ctx, b, chatID, fmt.Sprintf("Грубость (id: %d):\n%s", chatID, latestIncoming))
+		s.notifyOwner(ctx, b, fmt.Sprintf("Грубость (%s):\n%s", contact, latestIncoming))
 	case result.IsAction:
 		// Same reasoning -- the customer was told "передал инфу", so the
 		// owner actually needs to see it now, not just on NotifyOnSkip.
-		s.notifyOwnerAboutChat(ctx, b, chatID, fmt.Sprintf("Нужно решение (id: %d):\n%s", chatID, latestIncoming))
+		s.notifyOwner(ctx, b, fmt.Sprintf("Нужно решение (%s):\n%s", contact, latestIncoming))
 	}
 }
 
-// telegramLink opens the customer's chat directly -- chatID is their user
-// id (private chats: chat.id == user.id). Used as an inline button's URL,
-// not embedded in message text: plain-text tg:// links don't reliably
-// render as tappable across Telegram clients, buttons always do.
-func telegramLink(chatID int64) string {
-	return fmt.Sprintf("tg://user?id=%d", chatID)
+// contactLabel prefers the customer's captured name -- a plain "id N" isn't
+// clickable/useful on its own, and neither a raw tg:// link nor an inline
+// "open chat" button render reliably across Telegram clients (the button
+// can even fail the whole send outright on some accounts' privacy settings,
+// BUTTON_USER_PRIVACY_RESTRICTED) -- so this drops both in favor of a name.
+// The numeric id stays in parens purely so /mute and /unmute can still
+// parse a target from a replied-to notification.
+func contactLabel(name string, chatID int64) string {
+	if name == "" {
+		return fmt.Sprintf("id %d", chatID)
+	}
+	return fmt.Sprintf("%s, id %d", name, chatID)
 }
 
 func (s *Service) notifyOwner(ctx context.Context, b *tgbot.Bot, text string) {
 	if _, err := b.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: s.cfg.OwnerUserID, Text: text}); err != nil {
 		s.logger.Error("failed to notify owner", slog.Any("error", err))
-	}
-}
-
-// notifyOwnerAboutChat is notifyOwner plus a tappable "open chat" button --
-// see telegramLink's comment for why it's a button and not text. Telegram
-// rejects the button outright for some customers (privacy settings that
-// block "add to chat"-style deep links -- observed: BUTTON_USER_PRIVACY_RESTRICTED),
-// which fails the *whole* send, not just the button -- so on any error here,
-// fall back to plain notifyOwner rather than losing the notification.
-func (s *Service) notifyOwnerAboutChat(ctx context.Context, b *tgbot.Bot, chatID int64, text string) {
-	_, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
-		ChatID: s.cfg.OwnerUserID,
-		Text:   text,
-		ReplyMarkup: &models.InlineKeyboardMarkup{
-			InlineKeyboard: [][]models.InlineKeyboardButton{
-				{{Text: "Открыть чат", URL: telegramLink(chatID)}},
-			},
-		},
-	})
-	if err != nil {
-		s.logger.Warn("failed to notify owner with button, retrying without it", slog.Any("error", err))
-		s.notifyOwner(ctx, b, text)
 	}
 }
 

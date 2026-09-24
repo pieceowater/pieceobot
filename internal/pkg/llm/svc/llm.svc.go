@@ -3,10 +3,10 @@
 // returns either a short reply or the literal marker SKIP.
 //
 // No prompt caching: the system prompt (fixed rules + persona.md) is on the
-// order of a few hundred tokens, far under Haiku 4.5's 4096-token minimum
-// cacheable prefix -- a cache_control marker here would pay the write
-// premium and never get a read. Revisit only if persona.md grows past
-// ~3000 tokens.
+// order of a few hundred tokens, under every current model's minimum
+// cacheable prefix (1024-4096 tokens depending on model) -- a cache_control
+// marker here would pay the write premium and never get a read. Revisit
+// only if persona.md grows past ~3000 tokens.
 package svc
 
 import (
@@ -240,15 +240,29 @@ func parseModelOutput(rawText string, stickers map[string]string) (replyText, st
 	return replyText, stickerFileID, isRude, isAction
 }
 
+// DecideReply streams the response rather than waiting for one non-streaming
+// round trip -- Anthropic starts sending tokens as soon as the model
+// generates them, so time-to-first-byte (and so time-to-full-response, since
+// the SDK reads the stream as fast as it arrives) is lower than waiting for
+// the server to buffer the whole (short, max ~150-token) reply first.
 func (s *Service) DecideReply(ctx context.Context, historyText string) Result {
-	msg, err := s.client.Messages.New(ctx, anthropic.MessageNewParams{
+	stream := s.client.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
 		Model:       s.cfg.LLMModel,
 		MaxTokens:   s.cfg.MaxOutputTokens,
 		Temperature: anthropic.Float(0.7),
 		System:      []anthropic.TextBlockParam{{Text: s.systemPrompt}},
 		Messages:    []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(historyText))},
 	})
-	if err != nil {
+	defer stream.Close()
+
+	msg := anthropic.Message{}
+	for stream.Next() {
+		if err := msg.Accumulate(stream.Current()); err != nil {
+			s.logger.Warn("llm stream accumulate failed", slog.Any("error", err))
+			return Result{Error: true}
+		}
+	}
+	if err := stream.Err(); err != nil {
 		s.logger.Warn("llm call failed", slog.Any("error", err))
 		return Result{Error: true}
 	}

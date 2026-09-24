@@ -64,6 +64,8 @@ type ChatState struct {
 	Muted             bool
 	LastOwnerMsgTS    *int64
 	LastMessageFromMe bool
+	DisplayName       string
+	RateLimitNoticeTS *int64
 }
 
 type ChatStateRepo struct{ db *sql.DB }
@@ -72,19 +74,23 @@ func NewChatStateRepo(db *sql.DB) *ChatStateRepo { return &ChatStateRepo{db: db}
 
 func (r *ChatStateRepo) Get(ctx context.Context, chatID int64) (ChatState, error) {
 	row := r.db.QueryRowContext(ctx,
-		"SELECT muted, last_owner_msg_ts, last_message_from_me FROM chat_state WHERE chat_id = ?", chatID)
+		"SELECT muted, last_owner_msg_ts, last_message_from_me, display_name, rate_limit_notice_ts FROM chat_state WHERE chat_id = ?", chatID)
 	var muted, fromMe int
-	var lastOwnerTS sql.NullInt64
-	err := row.Scan(&muted, &lastOwnerTS, &fromMe)
+	var lastOwnerTS, rateLimitNoticeTS sql.NullInt64
+	var displayName string
+	err := row.Scan(&muted, &lastOwnerTS, &fromMe, &displayName, &rateLimitNoticeTS)
 	if err == sql.ErrNoRows {
 		return ChatState{}, nil
 	}
 	if err != nil {
 		return ChatState{}, err
 	}
-	state := ChatState{Muted: muted != 0, LastMessageFromMe: fromMe != 0}
+	state := ChatState{Muted: muted != 0, LastMessageFromMe: fromMe != 0, DisplayName: displayName}
 	if lastOwnerTS.Valid {
 		state.LastOwnerMsgTS = &lastOwnerTS.Int64
+	}
+	if rateLimitNoticeTS.Valid {
+		state.RateLimitNoticeTS = &rateLimitNoticeTS.Int64
 	}
 	return state, nil
 }
@@ -95,23 +101,45 @@ func (r *ChatStateRepo) upsert(ctx context.Context, chatID int64, apply func(*Ch
 		return err
 	}
 	apply(&state)
-	var lastOwnerTS any
+	var lastOwnerTS, rateLimitNoticeTS any
 	if state.LastOwnerMsgTS != nil {
 		lastOwnerTS = *state.LastOwnerMsgTS
 	}
+	if state.RateLimitNoticeTS != nil {
+		rateLimitNoticeTS = *state.RateLimitNoticeTS
+	}
 	_, err = r.db.ExecContext(ctx,
-		`INSERT INTO chat_state (chat_id, muted, last_owner_msg_ts, last_message_from_me)
-		 VALUES (?, ?, ?, ?)
+		`INSERT INTO chat_state (chat_id, muted, last_owner_msg_ts, last_message_from_me, display_name, rate_limit_notice_ts)
+		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(chat_id) DO UPDATE SET muted=excluded.muted,
 		   last_owner_msg_ts=excluded.last_owner_msg_ts,
-		   last_message_from_me=excluded.last_message_from_me`,
-		chatID, boolToInt(state.Muted), lastOwnerTS, boolToInt(state.LastMessageFromMe),
+		   last_message_from_me=excluded.last_message_from_me,
+		   display_name=excluded.display_name,
+		   rate_limit_notice_ts=excluded.rate_limit_notice_ts`,
+		chatID, boolToInt(state.Muted), lastOwnerTS, boolToInt(state.LastMessageFromMe), state.DisplayName, rateLimitNoticeTS,
 	)
 	return err
 }
 
 func (r *ChatStateRepo) SetMuted(ctx context.Context, chatID int64, muted bool) error {
 	return r.upsert(ctx, chatID, func(s *ChatState) { s.Muted = muted })
+}
+
+// SetDisplayName stashes the customer's name for use in owner notifications
+// -- captured once per incoming message (handleIncoming), since business
+// messages don't carry a re-fetchable chat title the way group chats do.
+func (r *ChatStateRepo) SetDisplayName(ctx context.Context, chatID int64, name string) error {
+	if name == "" {
+		return nil
+	}
+	return r.upsert(ctx, chatID, func(s *ChatState) { s.DisplayName = name })
+}
+
+// TouchRateLimitNotice records that the chat-rate-limit notice was just
+// sent, so it's only sent once per CHAT_WINDOW_SEC -- ТЗ follow-up.
+func (r *ChatStateRepo) TouchRateLimitNotice(ctx context.Context, chatID int64) error {
+	now := time.Now().Unix()
+	return r.upsert(ctx, chatID, func(s *ChatState) { s.RateLimitNoticeTS = &now })
 }
 
 // TouchOwnerManualMessage: the real owner typed this themselves (not the

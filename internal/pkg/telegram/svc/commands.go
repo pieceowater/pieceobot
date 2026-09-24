@@ -16,7 +16,9 @@ import (
 // Everything here is gated on OwnerUserID -- anyone else's commands are
 // silently ignored (ТЗ 3.5).
 
-var chatIDInText = regexp.MustCompile(`\(id:\s*(-?\d+)\)`)
+// Matches "id N)" inside a notification, whether the whole parenthetical is
+// "(id N)" or "(Имя, id N)" -- see telegram.svc.go's contactLabel.
+var chatIDInText = regexp.MustCompile(`\bid\s+(-?\d+)\)`)
 
 func (s *Service) handleCommand(ctx context.Context, b *tgbot.Bot, msg *models.Message) {
 	if msg.Chat.Type != models.ChatTypePrivate || msg.From == nil || msg.From.ID != s.cfg.OwnerUserID {
