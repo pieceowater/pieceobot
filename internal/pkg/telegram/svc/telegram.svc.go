@@ -313,7 +313,7 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 
 	if result.Error || (result.ReplyText == nil && result.StickerFileID == nil) {
 		if result.IsSkip() && s.cfg.NotifyOnSkip {
-			s.notifyOwner(ctx, b, fmt.Sprintf("Пропустил (%s):\n%s", telegramLink(chatID), latestIncoming))
+			s.notifyOwnerAboutChat(ctx, b, chatID, fmt.Sprintf("Пропустил (id: %d):\n%s", chatID, latestIncoming))
 		}
 		return
 	}
@@ -347,18 +347,37 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 	if result.IsRude {
 		// Always tell the owner about rude contacts, independent of
 		// NotifyOnSkip -- this isn't a skip, a reply was actually sent.
-		s.notifyOwner(ctx, b, fmt.Sprintf("Грубость (%s):\n%s", telegramLink(chatID), latestIncoming))
+		s.notifyOwnerAboutChat(ctx, b, chatID, fmt.Sprintf("Грубость (id: %d):\n%s", chatID, latestIncoming))
 	}
 }
 
-// telegramLink opens the customer's chat directly from a notification --
-// chatID is their user id (private chats: chat.id == user.id).
+// telegramLink opens the customer's chat directly -- chatID is their user
+// id (private chats: chat.id == user.id). Used as an inline button's URL,
+// not embedded in message text: plain-text tg:// links don't reliably
+// render as tappable across Telegram clients, buttons always do.
 func telegramLink(chatID int64) string {
 	return fmt.Sprintf("tg://user?id=%d", chatID)
 }
 
 func (s *Service) notifyOwner(ctx context.Context, b *tgbot.Bot, text string) {
 	if _, err := b.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: s.cfg.OwnerUserID, Text: text}); err != nil {
+		s.logger.Error("failed to notify owner", slog.Any("error", err))
+	}
+}
+
+// notifyOwnerAboutChat is notifyOwner plus a tappable "open chat" button --
+// see telegramLink's comment for why it's a button and not text.
+func (s *Service) notifyOwnerAboutChat(ctx context.Context, b *tgbot.Bot, chatID int64, text string) {
+	_, err := b.SendMessage(ctx, &tgbot.SendMessageParams{
+		ChatID: s.cfg.OwnerUserID,
+		Text:   text,
+		ReplyMarkup: &models.InlineKeyboardMarkup{
+			InlineKeyboard: [][]models.InlineKeyboardButton{
+				{{Text: "Открыть чат", URL: telegramLink(chatID)}},
+			},
+		},
+	})
+	if err != nil {
 		s.logger.Error("failed to notify owner", slog.Any("error", err))
 	}
 }
