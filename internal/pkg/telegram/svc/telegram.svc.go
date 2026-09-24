@@ -268,8 +268,21 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 	if historyText == "" {
 		return
 	}
+	latestIncoming := latestIncomingText(history)
 
 	result := s.llm.DecideReply(ctx, historyText)
+
+	// A bare sticker must never go silent (ТЗ follow-up) -- if the model
+	// skipped it anyway, force a reply: a configured sticker if we have
+	// one, else a plain emoji acknowledgement.
+	if result.IsSkip() && isStickerOnlyBatch(latestIncoming) {
+		if fileID, ok := s.llm.FallbackStickerFileID(); ok {
+			result.StickerFileID = &fileID
+		} else {
+			fallback := "😄"
+			result.ReplyText = &fallback
+		}
+	}
 
 	resultLabel := "skip"
 	switch {
@@ -294,7 +307,7 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 
 	if result.Error || (result.ReplyText == nil && result.StickerFileID == nil) {
 		if result.IsSkip() && s.cfg.NotifyOnSkip {
-			s.notifyOwner(ctx, b, fmt.Sprintf("Пропустил (%s): %s", telegramLink(chatID), lastLinePreview(historyText, 80)))
+			s.notifyOwner(ctx, b, fmt.Sprintf("Пропустил (%s):\n%s", telegramLink(chatID), latestIncoming))
 		}
 		return
 	}
@@ -328,7 +341,7 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 	if result.IsRude {
 		// Always tell the owner about rude contacts, independent of
 		// NotifyOnSkip -- this isn't a skip, a reply was actually sent.
-		s.notifyOwner(ctx, b, fmt.Sprintf("Грубость (%s): %s", telegramLink(chatID), lastLinePreview(historyText, 80)))
+		s.notifyOwner(ctx, b, fmt.Sprintf("Грубость (%s):\n%s", telegramLink(chatID), latestIncoming))
 	}
 }
 
@@ -344,12 +357,31 @@ func (s *Service) notifyOwner(ctx context.Context, b *tgbot.Bot, text string) {
 	}
 }
 
-func lastLinePreview(text string, maxLen int) string {
-	lines := strings.Split(text, "\n")
-	last := lines[len(lines)-1]
-	r := []rune(last)
-	if len(r) > maxLen {
-		return string(r[:maxLen])
+// latestIncomingText returns the customer's trailing run of messages since
+// this bot/the owner last spoke in this chat -- the exact, untruncated
+// content a skip/rude notification should show (ТЗ follow-up: forward the
+// real message, not an 80-char clipped preview).
+func latestIncomingText(history []repo.Message) string {
+	var lines []string
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].FromMe {
+			break
+		}
+		lines = append([]string{history[i].Text}, lines...)
 	}
-	return last
+	return strings.Join(lines, "\n")
+}
+
+// isStickerOnlyBatch reports whether the latest incoming turn is nothing
+// but sticker placeholders -- the case that must never be silently skipped.
+func isStickerOnlyBatch(latestIncoming string) bool {
+	if latestIncoming == "" {
+		return false
+	}
+	for _, line := range strings.Split(latestIncoming, "\n") {
+		if line != "[стикер]" {
+			return false
+		}
+	}
+	return true
 }

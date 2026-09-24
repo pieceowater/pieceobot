@@ -129,6 +129,25 @@ func New(c *cfg.Config, logger *slog.Logger) (*Service, error) {
 	}, nil
 }
 
+// FallbackStickerFileID picks a sticker to use as a guaranteed reply when a
+// bare incoming sticker must not go silent (ТЗ follow-up) but the model
+// decided to skip anyway. Prefers a tag named "ok", else the first tag in
+// sorted order, for a deterministic, reproducible choice.
+func (s *Service) FallbackStickerFileID() (string, bool) {
+	if len(s.stickers) == 0 {
+		return "", false
+	}
+	if fileID, ok := s.stickers["ok"]; ok {
+		return fileID, true
+	}
+	tags := make([]string, 0, len(s.stickers))
+	for tag := range s.stickers {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	return s.stickers[tags[0]], true
+}
+
 // stickerInstructions documents the available sticker tags in the prompt --
 // omitted entirely when there are none, so an unconfigured bot never sees
 // STICKER: mentioned at all.
@@ -143,6 +162,9 @@ func stickerInstructions(stickers map[string]string) string {
 	sort.Strings(tags) // deterministic prompt text
 	return "\n\nЕсли уместнее ответить стикером, а не текстом, и он точно подходит по смыслу/настроению " +
 		"(не используй просто так) — вместо текста выведи ровно STICKER:<тег> и больше ничего. " +
+		"Если собеседник сам прислал стикер или гифку (в истории это выглядит как \"[стикер]\"/\"[gif]\") — " +
+		"это нормальный повод ответить в тон подходящим стикером, если такой есть среди тегов; " +
+		"если точного совпадения по смыслу нет — просто ответь текстом или SKIP, не подбирай стикер наугад. " +
 		"Доступные теги: " + strings.Join(tags, ", ") + "."
 }
 
