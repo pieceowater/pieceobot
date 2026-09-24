@@ -359,6 +359,15 @@ func (s *Service) processBatch(ctx context.Context, b *tgbot.Bot, chatID int64, 
 	if allowed, reason := s.shouldConsider(ctx, chatID); !allowed {
 		if reason == "chat_rate" {
 			s.maybeNotifyRateLimited(ctx, b, chatID, connID)
+			// Don't just go silent until another message happens to arrive --
+			// retry once the window that's blocking us has rolled over, and
+			// reply to everything that piled up in the meantime as one batch.
+			retryDelay := time.Duration(s.cfg.ChatWindowSec) * time.Second
+			s.debounce.TriggerAfter(chatID, retryDelay, func() {
+				bg, cancel := context.WithTimeout(context.Background(), processTimeout)
+				defer cancel()
+				s.processBatch(bg, b, chatID, connID)
+			})
 		}
 		return
 	}

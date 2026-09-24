@@ -61,6 +61,32 @@ func (s *Service) Trigger(chatID int64, callback func()) {
 	})
 }
 
+// TriggerAfter schedules callback to fire exactly `delay` from now for
+// chatID, replacing any pending timer for that chat (debounce or a prior
+// retry) -- unlike Trigger, it ignores the burst-window (batchStart) logic
+// entirely. Used to retry a chat once a rate limit is expected to have
+// cleared, so an exchange that got rate-limited doesn't just go silent
+// forever waiting for the customer to send one more message: whatever they
+// sent while waiting is still picked up as one batch when the retry fires,
+// via the normal history-based batching in llmsvc.BuildHistoryText.
+func (s *Service) TriggerAfter(chatID int64, delay time.Duration, callback func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if t, ok := s.timers[chatID]; ok {
+		t.Stop()
+	}
+	delete(s.batchStart, chatID)
+
+	s.timers[chatID] = time.AfterFunc(delay, func() {
+		s.mu.Lock()
+		delete(s.timers, chatID)
+		delete(s.batchStart, chatID)
+		s.mu.Unlock()
+		callback()
+	})
+}
+
 func (s *Service) Shutdown() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
