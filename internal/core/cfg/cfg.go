@@ -90,7 +90,7 @@ func Inst() *Config {
 			PriceInputPerMTok:  getEnvFloat("PRICE_INPUT_PER_MTOK", 1.00),
 			PriceOutputPerMTok: getEnvFloat("PRICE_OUTPUT_PER_MTOK", 5.00),
 
-			NotifyOnSkip:   getEnvBool("NOTIFY_ON_SKIP", true),
+			NotifyOnSkip:   getEnvBool("NOTIFY_ON_SKIP", false),
 			HistoryTTLDays: getEnvInt("HISTORY_TTL_DAYS", 7),
 
 			Blacklist: getIDSet("BLACKLIST"),
